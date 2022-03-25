@@ -17,9 +17,14 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"../labrpc"
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -34,32 +39,56 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type Vote int
+
+const (
+	No Vote = iota
+	Yes
+	Waiting
+)
+
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	mu    sync.Mutex          // Lock to protect shared access to this peer's state
+	peers []*labrpc.ClientEnd // RPC end points of all peers
+	me    int                 // this peer's index into peers[]
+	dead  int32               // set by Kill()
 
 	// Your data here (2A, 2B).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	// You may also need to add other state, as per your implementation.
 
+	curr_term   int
+	timer       *time.Timer
+	timeout     time.Duration
+	total_nodes int
+
+	// Leader
+	curr_leader int
+	is_leader   bool
+
+	// Candidate
+	is_candidate bool
+	votes        []Vote
+
+	// Follower
+	voted_for int
+
+	// Messages
+	log []string
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (2A).
 	return term, isleader
 }
-
 
 //
 // example RequestVote RPC arguments structure.
@@ -67,6 +96,8 @@ func (rf *Raft) GetState() (int, bool) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	id           int
+	request_term int
 }
 
 //
@@ -75,6 +106,7 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	accepted bool
 }
 
 //
@@ -82,8 +114,22 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	// Read the fields in "args", 
+	// Read the fields in "args",
 	// and accordingly assign the values for fields in "reply".
+
+	if args.request_term < rf.curr_term {
+		reply.accepted = false
+		return
+	}
+
+	if args.request_term > rf.curr_term { // new term
+		rf.NewTerm(args.request_term)
+	}
+
+	if rf.voted_for != -1 || rf.voted_for == args.id {
+		reply.accepted = true
+		rf.voted_for = args.id
+	}
 }
 
 //
@@ -120,7 +166,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -141,7 +186,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -182,7 +226,46 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.me = me
 
+	rf.total_nodes = len(peers) + 1
+
 	// Your initialization code here (2A, 2B).
+	// Leader
+	rf.curr_leader = -1
+	rf.is_leader = false
+
+	// Candidate
+	rf.is_candidate = false
+	rf.votes = make([]Vote, rf.total_nodes-1)
+
+	// Initializes like a new term
+	rf.NewTerm(1)
 
 	return rf
+}
+
+func (rf *Raft) NewTerm(new_term int) {
+	// set the new term values
+	rf.curr_term = new_term
+	rf.voted_for = -1
+
+	// Pick a new duration any number [10, 15]s
+	// Timer bs
+	duration := RandomNum(10, 15)
+	rf.timeout = time.Duration(duration) * time.Second
+	rf.timer = time.NewTimer(rf.timeout)
+
+	// create thread to check when timer is done
+}
+
+func TimeoutHandler() {
+	// initiate election
+	// Change is_candidate to true
+
+}
+
+// Creates random number in range [min, max] TODO: STRESS TEST
+func RandomNum(min int, max int) int {
+	rand.Seed(time.Now().UnixNano())
+	rand_num := rand.Intn(max-min+1) + min
+	return rand_num
 }
