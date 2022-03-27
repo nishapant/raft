@@ -1,0 +1,168 @@
+// package go
+
+// func (rf *Raft) NewTerm(new_term int) {
+// 	// set the new term values
+// 	// wrap in a mutex
+
+// 	// Timer
+
+// }
+
+// // Handles sending heartbeats
+// func (rf *Raft) HeartbeatHandler() {
+// 	for {
+// 		rf.mutex.Lock()
+// 		if rf.curr_state == LEADER {
+// 			rf.mutex.Unlock()
+// 			for index, peer := range rf.peers {
+// 				if index != rf.me {
+// 					go peer.Call("Raft.AppendEntries", AppendEntries{}, AppendEntriesReply{})
+// 				}
+// 			}
+// 		}
+// 		rf.mutex.Unlock()
+// 	}
+// }
+
+// // Handles election, and sending messages
+// func (rf *Raft) GeneralHandler() {
+// 	// 1) If there is a leader
+// 	// 1.a) You are the leader
+
+// 	// 1.b) You are a follower
+
+// 	// 2) There is no leader
+// 	// 2.a) You are the candidate
+
+// 	// 2.b) You are a follower
+
+// 	for {
+// 		if rf.curr_state == LEADER {
+// 			rf.LeaderHandler()
+// 		}
+
+// 		if rf.curr_state == CANDIDATE {
+// 			rf.CandidateHandler()
+// 		}
+
+// 		if rf.curr_state == FOLLOWER {
+// 			rf.VoterHandler()
+// 		}
+// 	}
+
+// }
+
+// func (rf *Raft) LeaderHandler() {
+// 	// Update messages of peers
+
+// }
+
+// func (rf *Raft) FollowerHandler() {
+// 	// Wait for messages
+
+// 	// On message, reset timer
+// 	rf.update_timer_mut.Lock()
+// 	rf.update_timer = true
+// 	rf.update_timer_mut.Unlock()
+
+// }
+
+// func (rf *Raft) CandidateHandler() {
+// 	// Send RequestVote RPC's in a loop
+// 	// Continue sending
+// 	// Initialize Candidate Stuff
+
+// 	for index, _ := range rf.peers {
+// 		if index != rf.me {
+// 			rf.votes = append(rf.votes, Waiting)
+// 		} else {
+// 			rf.votes = append(rf.votes, Yes)
+// 		}
+// 	}
+
+// 	// Send RequestVote RPC's
+// 	for index, peer := range rf.peers {
+// 		if index != rf.me {
+// 			go rf.SendRequestVoteMessage(peer)
+// 		}
+// 	}
+
+// 	// Check all continually
+// 	max_votes := len(rf.peers)
+// 	majority := int(math.Ceil(float64(max_votes) / 2.0))
+// 	for {
+// 		count := 0
+// 		for _, vote := range rf.votes {
+// 			if vote == Yes {
+// 				count += 1
+// 			}
+// 		}
+
+// 		if count >= majority {
+// 			break
+// 		}
+// 	}
+
+// 	// Won election!
+// 	rf.mutex.Lock()
+// 	rf.curr_state = LEADER
+// 	rf.mutex.Unlock()
+
+// }
+
+// func (rf *Raft) SendRequestVoteMessage(peer *labrpc.ClientEnd) {
+// 	// Send ReqVotemsg
+// 	log_entry := rf.log[len(rf.log)-1]
+// 	args := RequestVoteArgs{CandidateId: rf.me, RequestTerm: rf.curr_term, LastLogIndex: len(rf.log), LastLogTerm: log_entry.Term}
+// 	reply := RequestVoteReply{}
+// 	peer.Call("Raft.RequestVote", args, reply)
+
+// 	// When reply comes in, update array
+// 	other_id := reply.PeerId
+// 	rf.mutex.Lock()
+// 	rf.votes[other_id] = 1
+// 	rf.mutex.Unlock()
+// }
+
+// func (rf *Raft) VoterHandler() {
+
+// }
+
+// // Reference: https://golangr.com/timers/
+// func (rf *Raft) TimerHandler() {
+// 	for {
+// 		timed_out := false
+// 		leader_is_alive := false
+
+// 		// 1) Run until timer runs out
+// 		go func() {
+// 			// Wait for timer to run out
+// 			<-rf.timer.C
+
+// 			// Set timed out flag equal to true
+// 			timed_out = true
+// 		}()
+
+// 		// 2) Check if the timer needs to be reset
+// 		for timed_out == false && leader_is_alive == false {
+// 			rf.update_timer_mut.Lock()
+
+// 			if rf.update_timer == true {
+// 				rf.timer.Stop()
+// 				leader_is_alive = true
+// 				rf.update_timer = false
+// 			}
+// 			rf.update_timer_mut.Unlock()
+// 		}
+
+// 		// If the timer ran out and there is no leader
+// 		if leader_is_alive == false {
+// 			rf.curr_state = CANDIDATE
+// 			rf.curr_leader = -1
+// 		}
+
+// 		// Both situations: Reset the timer
+// 		rf.ResetTimer()
+// 	}
+
+// }
