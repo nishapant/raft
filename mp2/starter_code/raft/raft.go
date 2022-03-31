@@ -114,9 +114,10 @@ type Raft struct {
 	voted_for int
 
 	// Messages
-	log              []LogEntry
-	clientNextIndex  []int
-	clientMatchIndex []int
+	log []LogEntry
+	// note: these arrs are len(peers) with index rf.me as 0
+	clientNextIndex  []int // The next index to check to see if it matches
+	clientMatchIndex []int // The last index to which we KNOW the entries match between this server and the other one
 }
 
 // return currentTerm and whether this server
@@ -414,8 +415,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Messages
 	rf.log = make([]LogEntry, 0)
-	rf.clientNextIndex = make([]int, rf.total_nodes-1)
-	rf.clientNextIndex = make([]int, rf.total_nodes-1)
+	rf.clientNextIndex = make([]int, rf.total_nodes)
+	rf.clientNextIndex = make([]int, rf.total_nodes)
 
 	// Reset Timer
 	rf.ResetTimer()
@@ -505,7 +506,7 @@ func (rf *Raft) GeneralHandler() {
 				log.Printf("TIMED OUT (as candidate) %d\n", rf.me)
 				rf.ResetTimer()
 
-				// Call Election bc Candidate
+				// Call Election after timeout
 				rf.mutex.Lock()
 				rf.StartElection()
 				rf.mutex.Unlock()
@@ -542,26 +543,32 @@ func (rf *Raft) get_last_log_entry_info() (int, int) {
 // LEADER
 func (rf *Raft) HandleLogConsensus() {
 	// log.Printf("In handle log consensus...")
-	self_last_idx, self_last_term := rf.get_last_log_entry_info()
+	_, self_last_term := rf.get_last_log_entry_info()
 
 	for index, _ := range rf.peers {
 		if index != rf.me {
-			// server_id := index
+			server_id := index
+			last_idx_follower := rf.clientNextIndex[server_id]
+			new_entries := []LogEntry{} // THIS NEEDS TO CHANGE TO SOMETHING IDK
+
 			args := AppendEntriesArgs{
 				Term:            rf.curr_term,
 				LeaderId:        rf.me,
 				PrevLogTerm:     self_last_term,
-				PrevLogIndex:    self_last_idx,
-				Entries:         []LogEntry{},
+				PrevLogIndex:    last_idx_follower,
+				Entries:         new_entries,
 				LeaderCommitIdx: rf.commit_idx,
 			}
 			reply := AppendEntriesReply{}
 			rf.sendAppendEntries(index, &args, &reply)
 
 			if reply.Success == true {
-				// Update log indecies, etc.
-				// rf.clientNextIndex[server_id] = self_last_idx
+				// This means that we got the right index! update stuff
+				rf.clientNextIndex[server_id] = last_idx_follower + len(new_entries)
+				rf.clientMatchIndex[server_id] = rf.clientNextIndex[server_id] - 1
 			} else {
+				// update next index to be one less than it was before
+				rf.clientNextIndex[server_id] = last_idx_follower - 1
 
 			}
 		}
