@@ -85,6 +85,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 	// You may also need to add other state, as per your implementation.
 
+	// Misc
 	total_nodes int
 
 	// Channels
@@ -94,9 +95,8 @@ type Raft struct {
 	reply_message_ch  chan RequestVoteReply
 
 	// Current
-	curr_state  State
-	curr_term   int
-	state_mutex sync.Mutex
+	curr_state State
+	curr_term  int
 
 	// Timer
 	timer   *time.Timer
@@ -104,6 +104,7 @@ type Raft struct {
 
 	// Leader
 	curr_leader int
+	commit_idx  int
 
 	// Candidate
 	votes     []Vote
@@ -222,6 +223,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// Reset timer
+	rf.ResetTimer()
+
 	// log.Printf("Heartbeat received from %d to %d", args.LeaderId, rf.me)
 	// Heartbeat
 	if args.Term > rf.curr_term { // if we are receiving message from new leader
@@ -232,15 +236,44 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mutex.Unlock()
 	}
 
-	if rf.curr_term > args.Term { // receiving message from a non-leader
+	// the other node is not up to date
+	// receiving message from an old leader
+	if rf.curr_term > args.Term {
 		reply.CurrTerm = rf.curr_term
 		reply.CurrLeader = rf.curr_leader
 		reply.Success = false
+		return
 	}
 
-	rf.ResetTimer()
-
 	// Log entries
+	// For all AppendEntryReply instances, set the curr leader and curr term
+	reply.CurrLeader = rf.curr_leader
+	reply.CurrTerm = rf.curr_term
+
+	self_index, _ := rf.get_last_log_entry_info()
+
+	// Not yet reached the last element in our log array
+	if self_index < args.PrevLogIndex {
+		reply.Success = false
+		return
+	}
+
+	// Reached last element in our log array!
+	if self_index >= args.PrevLogIndex {
+		// Iterate through our logs to find the first index that matches the term
+		// 		that the incoming AppendEntries RPC is proposing
+
+		for index, _ := range rf.log {
+			entry := rf.log[index]
+			if entry.Term == args.PrevLogTerm {
+				// keep going
+			} else {
+				// This is where the two logs do not match up
+				// idk bro
+			}
+		}
+	}
+
 }
 
 //
@@ -355,6 +388,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.me = me
 
+	// Misc
 	rf.total_nodes = len(peers)
 
 	// Channels
@@ -363,23 +397,30 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.append_message_ch = make(chan bool)
 	rf.reply_message_ch = make(chan RequestVoteReply)
 
+	// Current
+	rf.curr_state = FOLLOWER
+	rf.curr_term = 1
+
 	// Your initialization code here (2A, 2B).
 	// Leader
-	rf.curr_state = FOLLOWER
 	rf.curr_leader = -1
 
 	// Candidate
 	rf.votes = make([]Vote, rf.total_nodes-1)
 	rf.yes_votes = 0
 
-	// Initializes like a new term
-	rf.curr_term = 1
+	// Follower
 	rf.voted_for = -1
+
+	// Messages
+	rf.log = make([]LogEntry, 0)
+	rf.clientNextIndex = make([]int, rf.total_nodes-1)
+	rf.clientNextIndex = make([]int, rf.total_nodes-1)
+
+	// Reset Timer
 	rf.ResetTimer()
 
-	log.Printf("Starting threads...")
-
-	// Start threads
+	////////// Start threads
 	// 1) Handle heartbeat
 	go rf.HeartbeatHandler()
 	// 2) Handle messages / election / everything else
@@ -432,8 +473,7 @@ func (rf *Raft) GeneralHandler() {
 			log.Printf("IS LEADER %d\n", rf.me)
 			// break
 
-			// call function to send appendentries
-
+			// Handle AppendEntries RPC's
 			rf.HandleLogConsensus()
 
 		} else if curr_state == FOLLOWER {
@@ -464,10 +504,13 @@ func (rf *Raft) GeneralHandler() {
 			case <-rf.timer.C:
 				log.Printf("TIMED OUT (as candidate) %d\n", rf.me)
 				rf.ResetTimer()
+
+				// Call Election bc Candidate
 				rf.mutex.Lock()
 				rf.StartElection()
 				rf.mutex.Unlock()
 			default:
+				// As default, check if we have the majority vote to become leader
 				rf.mutex.Lock()
 				if rf.HasMajorityVote() {
 					rf.curr_leader = rf.me
@@ -483,31 +526,6 @@ func (rf *Raft) GeneralHandler() {
 
 }
 
-func (rf *Raft) HandleLogConsensus() {
-	log.Printf("In handle log consensus...")
-
-	for index, _ := range rf.peers {
-		if index != rf.me {
-			args := AppendEntriesArgs{
-				Term:            rf.curr_term,
-				LeaderId:        rf.me,
-				PrevLogTerm:     -1,
-				PrevLogIndex:    -1,
-				Entries:         []LogEntry{},
-				LeaderCommitIdx: -1,
-			}
-			reply := AppendEntriesReply{}
-			rf.sendAppendEntries(index, &args, &reply)
-
-			if reply.Success == true {
-				// Update log indecies, etc.
-			} else {
-				// Demote to follower
-			}
-		}
-	}
-}
-
 // HELPER METHODS
 // GENERAL
 
@@ -519,6 +537,35 @@ func (rf *Raft) get_last_log_entry_info() (int, int) {
 	}
 
 	return rf.curr_term, 0
+}
+
+// LEADER
+func (rf *Raft) HandleLogConsensus() {
+	// log.Printf("In handle log consensus...")
+	self_last_idx, self_last_term := rf.get_last_log_entry_info()
+
+	for index, _ := range rf.peers {
+		if index != rf.me {
+			// server_id := index
+			args := AppendEntriesArgs{
+				Term:            rf.curr_term,
+				LeaderId:        rf.me,
+				PrevLogTerm:     self_last_term,
+				PrevLogIndex:    self_last_idx,
+				Entries:         []LogEntry{},
+				LeaderCommitIdx: rf.commit_idx,
+			}
+			reply := AppendEntriesReply{}
+			rf.sendAppendEntries(index, &args, &reply)
+
+			if reply.Success == true {
+				// Update log indecies, etc.
+				// rf.clientNextIndex[server_id] = self_last_idx
+			} else {
+
+			}
+		}
+	}
 }
 
 // CANDIDATE
