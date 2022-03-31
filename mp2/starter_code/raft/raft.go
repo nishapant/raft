@@ -439,6 +439,8 @@ func (rf *Raft) StartElection() {
 				CurrTerm:    -1,
 				VoteGranted: false,
 			}
+
+			// CHANGE THIS bc the reply thing isn't going to be updated in the separate thread bc i think diff stacks??
 			go rf.sendRequestVote(index, &args, &reply)
 			replies = append(replies, &reply)
 		}
