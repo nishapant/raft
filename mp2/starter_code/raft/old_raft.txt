@@ -166,3 +166,22 @@
 // 	}
 
 // }
+
+
+	// count := 0
+	// for _, reply_ref := range replies {
+	// 	reply := *reply_ref
+	// 	// If reply is YES
+	// 	if reply.VoteGranted {
+	// 		count += 1
+	// 	}
+
+	// 	// If reply is NO check the term
+	// 	// See if we need to become a follower
+	// 	if !reply.VoteGranted {
+	// 		if reply.CurrTerm > rf.curr_term {
+	// 			rf.curr_state = FOLLOWER
+	// 			return
+	// 		}
+	// 	}
+	// }

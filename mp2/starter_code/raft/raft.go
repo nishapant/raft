@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"log"
 	"math"
 	"math/rand"
 	"sync"
@@ -45,8 +46,8 @@ type ApplyMsg struct {
 
 // General Consts
 const (
-	Min_Duration = 100
-	Max_Duration = 500
+	Min_Duration = 300
+	Max_Duration = 900
 )
 
 type State int
@@ -87,13 +88,14 @@ type Raft struct {
 	total_nodes int
 
 	// Channels
+	applyChannel      chan ApplyMsg
 	vote_message_ch   chan bool
 	append_message_ch chan bool
+	reply_message_ch  chan RequestVoteReply
 
 	// Current
-	curr_state   State
-	curr_term    int
-	applyChannel chan ApplyMsg
+	curr_state State
+	curr_term  int
 
 	// Timer
 	timer   *time.Timer
@@ -193,13 +195,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	self_term, self_index := rf.get_last_log_entry_info()
 
-	voted_condition := (rf.voted_for != -1 || rf.voted_for == args.CandidateId)
+	voted_condition := (rf.voted_for == -1 || rf.voted_for == args.CandidateId)
 	log_deny_condition := (args.LastLogTerm > self_term) ||
 		((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index))
 
+	log.Printf("voted condition is %t on raft %d", voted_condition, rf.me)
+	log.Printf("voted condition is %t on raft %d", voted_condition, rf.me)
+	log.Printf("log deny condition is %t on raft %d", voted_condition, rf.me)
 	if voted_condition && !log_deny_condition {
 		rf.mutex.Lock()
 		reply.VoteGranted = true
+		reply.CurrTerm = rf.curr_term
 		rf.voted_for = args.CandidateId
 		rf.mutex.Unlock()
 	}
@@ -207,14 +213,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Add reply to request vote channel
 	if voted_condition && !log_deny_condition {
 		rf.vote_message_ch <- true
-
 	}
-
 }
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	log.Printf("Heartbeat received from %d to %d", args.LeaderId, rf.me)
+	// Heartbeat
+	if args.Term > rf.curr_term {
+		rf.curr_state = FOLLOWER
+		rf.curr_leader = args.LeaderId
+		rf.curr_term = args.Term
+	}
+	rf.ResetTimer()
 
+	// Log entries
 }
 
 //
@@ -248,6 +261,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	log.Printf("Received Reply from: %d with response: %t", reply.PeerId, reply.VoteGranted)
+	rf.reply_message_ch <- *reply
 	return ok
 }
 
@@ -312,27 +327,34 @@ func (rf *Raft) killed() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	applyCh chan ApplyMsg) *Raft {
+	log.Printf("Making raft, id: %d", me)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.me = me
+
+	rf.total_nodes = len(peers)
+
+	// Channels
 	rf.applyChannel = applyCh
 	rf.vote_message_ch = make(chan bool)
 	rf.append_message_ch = make(chan bool)
-
-	rf.total_nodes = len(peers)
-	rf.yes_votes = 0
+	rf.reply_message_ch = make(chan RequestVoteReply)
 
 	// Your initialization code here (2A, 2B).
 	// Leader
+	rf.curr_state = FOLLOWER
 	rf.curr_leader = -1
 
 	// Candidate
 	rf.votes = make([]Vote, rf.total_nodes-1)
+	rf.yes_votes = 0
 
 	// Initializes like a new term
 	rf.curr_term = 1
 	rf.voted_for = -1
 	rf.ResetTimer()
+
+	log.Printf("Starting threads...")
 
 	// Start threads
 	// 1) Handle heartbeat
@@ -345,19 +367,26 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // HANDLERS
 func (rf *Raft) HeartbeatHandler() {
-	for index, _ := range rf.peers {
-		args := AppendEntriesArgs{
-			Term:            rf.curr_term,
-			LeaderId:        rf.me,
-			PrevLogTerm:     -1,
-			PrevLogIndex:    -1,
-			Entries:         []LogEntry{},
-			LeaderCommitIdx: -1,
-		}
-		reply := AppendEntriesReply{}
+	for {
+		if rf.curr_state == LEADER {
+			log.Printf("Sending heartbeats as leader: %d", rf.me)
+			for index, _ := range rf.peers {
+				args := AppendEntriesArgs{
+					Term:            rf.curr_term,
+					LeaderId:        rf.me,
+					PrevLogTerm:     -1,
+					PrevLogIndex:    -1,
+					Entries:         []LogEntry{},
+					LeaderCommitIdx: -1,
+				}
+				reply := AppendEntriesReply{}
 
-		// Send append entries
-		go rf.sendAppendEntries(index, &args, &reply)
+				// Send append entries
+				go rf.sendAppendEntries(index, &args, &reply)
+			}
+
+			time.Sleep(time.Millisecond * 200)
+		}
 	}
 }
 
@@ -365,42 +394,53 @@ func (rf *Raft) GeneralHandler() {
 	rf.ResetTimer()
 	for {
 		if rf.curr_state == LEADER {
-			break
+			// log.Printf("IS LEADER %d\n", rf.me)
+			// break
+
 		}
 
 		if rf.curr_state == FOLLOWER {
+			log.Printf("IS FOLLOWER %d\n", rf.me)
 			rf.mutex.Lock()
 			select {
 			case <-rf.append_message_ch:
+				log.Printf("APPEND MESSAGE SENT %d\n", rf.me)
 				rf.ResetTimer()
 			case <-rf.vote_message_ch:
+				log.Printf("VOTE MESSAGE\n")
 				rf.ResetTimer()
 			case <-rf.timer.C:
+				log.Printf("TIMED OUT (as follower) %d\n", rf.me)
 				rf.curr_state = CANDIDATE
 				rf.curr_leader = -1
 				rf.ResetTimer()
 			}
 			rf.mutex.Unlock()
-			break
+			// break
 		}
+		// log.Printf("Reaching before curr state is candidate... %d", rf.me)
 
 		if rf.curr_state == CANDIDATE {
+			// log.Printf("IS CANDIDATE %d\n", rf.me)
 			rf.mutex.Lock()
 			select {
 			case <-rf.vote_message_ch:
+				log.Printf("VOTE MESSAGE RECEIVED %d\n", rf.me)
 				rf.ResetTimer()
 			case <-rf.timer.C:
+				log.Printf("TIMED OUT (as candidate) %d\n", rf.me)
 				rf.ResetTimer()
 				rf.StartElection()
-				// default:
-				// 	if rf.HasMajorityVote() {
-				// 		rf.curr_leader = rf.me
-				// 		rf.curr_state = LEADER
-				// 	}
-				// }
-				rf.mutex.Unlock()
+			default:
+				if rf.HasMajorityVote() {
+					log.Printf("HAS MAJORITY VOTE, id: %d\n", rf.me)
+					rf.curr_leader = rf.me
+					rf.curr_state = LEADER
+					rf.ResetTimer()
+				}
 			}
-			break
+			rf.mutex.Unlock()
+			// break
 		}
 
 	}
@@ -410,22 +450,27 @@ func (rf *Raft) GeneralHandler() {
 // HELPER METHODS
 // GENERAL
 
-// get_last_log_entry_info()
 // Returns (term, index) for the last entry of any raft
 func (rf *Raft) get_last_log_entry_info() (int, int) {
-	last_entry := rf.log[len(rf.log)-1]
-	return last_entry.Term, len(rf.log) - 1
+	if len(rf.log) != 0 {
+		last_entry := rf.log[len(rf.log)-1]
+		return last_entry.Term, len(rf.log)
+	}
+
+	return rf.curr_term, 0
 }
 
 // CANDIDATE
 func (rf *Raft) StartElection() {
+	log.Printf("STARTED ELECTION, id: %d\n", rf.me)
+
 	// Reset what we need to
 	rf.yes_votes = 0
+	rf.curr_term = rf.curr_term + 1
 
 	// Create args and reply objects and send to all peers
-	replies := []*RequestVoteReply{}
-
 	for index, _ := range rf.peers {
+		// log.Printf("index which is the peer: %d", index)
 		if index != rf.me {
 			self_term, self_index := rf.get_last_log_entry_info()
 			args := RequestVoteArgs{
@@ -442,39 +487,34 @@ func (rf *Raft) StartElection() {
 
 			// CHANGE THIS bc the reply thing isn't going to be updated in the separate thread bc i think diff stacks??
 			go rf.sendRequestVote(index, &args, &reply)
-			replies = append(replies, &reply)
 		}
 	}
 
-	count := 0
-	for _, reply_ref := range replies {
-		reply := *reply_ref
-		// If reply is YES
-		if reply.VoteGranted {
-			count += 1
-		}
+	time.Sleep(time.Millisecond * 300)
 
-		// If reply is NO check the term
-		// See if we need to become a follower
-		if !reply.VoteGranted {
-			if reply.CurrTerm > rf.curr_term {
-				rf.curr_state = FOLLOWER
-				return
+	go rf.CountVotes()
+
+}
+
+func (rf *Raft) CountVotes() {
+	log.Printf("In count votes, id: %d", rf.me)
+	for {
+		select {
+		case reply := <-rf.reply_message_ch:
+			log.Printf("id: %d, reply channel vote granted: %t", rf.me, reply.VoteGranted)
+			if reply.VoteGranted == true {
+				rf.yes_votes = rf.yes_votes + 1
 			}
+		case <-rf.timer.C:
+			log.Printf("timer ran out lolololol")
+			rf.ResetTimer()
+			return
 		}
 	}
-	rf.yes_votes = count
-
-	elected_leader := rf.HasMajorityVote()
-	if elected_leader {
-		rf.curr_state = LEADER
-	}
-
 }
 
 func (rf *Raft) HasMajorityVote() bool {
 	majority := int(math.Ceil(float64(rf.total_nodes) / 2.0))
-
 	if rf.yes_votes >= majority {
 		return true
 	}
@@ -487,11 +527,9 @@ func (rf *Raft) HasMajorityVote() bool {
 // 1) Sets the new duration of the timer to a randomized value
 // 2) Creates a new timer with that duration
 func (rf *Raft) ResetTimer() {
-	// rf.mutex.Lock()
 	duration := RandomNum(Min_Duration, Max_Duration)
 	rf.timeout = time.Duration(duration) * time.Millisecond
 	rf.timer = time.NewTimer(rf.timeout)
-	// rf.mutex.Unlock()
 }
 
 // Creates random number in range [min, max] TODO: STRESS TEST
