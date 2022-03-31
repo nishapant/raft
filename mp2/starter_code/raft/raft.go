@@ -191,6 +191,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.curr_state = FOLLOWER
 		rf.curr_term = args.RequestTerm
 		rf.voted_for = -1
+		rf.yes_votes = 0
 		rf.mutex.Unlock()
 	}
 
@@ -221,17 +222,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	log.Printf("Heartbeat received from %d to %d", args.LeaderId, rf.me)
 	// Heartbeat
 	if args.Term > rf.curr_term { // if we are receiving message from new leader
+		rf.mutex.Lock()
 		rf.curr_state = FOLLOWER
 		rf.curr_leader = args.LeaderId
 		rf.curr_term = args.Term
+		rf.mutex.Unlock()
 	}
 
-	// if rf.curr_term > args.Term { // receiving message from a non-leader
-	// 	reply.CurrTerm = rf.curr_term
-	// 	reply.CurrLeader = rf.curr_leader
-	// 	reply.Success = false
-	// }
+	if rf.curr_term > args.Term { // receiving message from a non-leader
+		reply.CurrTerm = rf.curr_term
+		reply.CurrLeader = rf.curr_leader
+		reply.Success = false
+	}
+	// rf.mutex.Lock()
 	rf.ResetTimer()
+	// rf.mutex.Unlock()
 
 	// Log entries
 }
@@ -274,11 +279,16 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	// if (reply.CurrTerm > rf.curr_term) {
-	// 	rf.curr_term = reply.CurrTerm
-	// 	rf.curr_leader = reply.CurrLeader
-	// 	rf.curr_state = FOLLOWER
-	// }
+	if reply.CurrTerm > rf.curr_term {
+		rf.mutex.Lock()
+		log.Printf("id %d: Converting to flllower in append entries", rf.me)
+		rf.curr_term = reply.CurrTerm
+		rf.curr_leader = reply.CurrLeader
+		rf.curr_state = FOLLOWER
+		rf.yes_votes = 0
+		rf.mutex.Unlock()
+
+	}
 	return ok
 }
 
