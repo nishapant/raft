@@ -94,8 +94,9 @@ type Raft struct {
 	reply_message_ch  chan RequestVoteReply
 
 	// Current
-	curr_state State
-	curr_term  int
+	curr_state  State
+	curr_term   int
+	state_mutex sync.Mutex
 
 	// Timer
 	timer   *time.Timer
@@ -179,14 +180,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// Follow response logic from slides
 	// If curr term is greater than the argument term
-	if args.RequestTerm < rf.curr_term {
+	rf.mutex.Lock()
+	curr_term := rf.curr_term
+	rf.mutex.Unlock()
+
+	if args.RequestTerm < curr_term {
 		reply.VoteGranted = false
 		return
 	}
 
 	// If curr term is less than argument term (we are old)
 	if args.RequestTerm > rf.curr_term {
-		log.Printf("at node %d: request vote args req term is %d, our term is %d", rf.me, args.RequestTerm, rf.curr_term)
 		rf.mutex.Lock()
 		rf.curr_state = FOLLOWER
 		rf.curr_term = args.RequestTerm
@@ -201,7 +205,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	log_deny_condition := (args.LastLogTerm > self_term) ||
 		((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index))
 
-	log.Printf("voted condition is %t on raft %d", voted_condition, rf.me)
 	log.Printf("log deny condition is %t on raft %d", log_deny_condition, rf.me)
 	if voted_condition && !log_deny_condition {
 		rf.mutex.Lock()
@@ -219,7 +222,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	log.Printf("Heartbeat received from %d to %d", args.LeaderId, rf.me)
+	// log.Printf("Heartbeat received from %d to %d", args.LeaderId, rf.me)
 	// Heartbeat
 	if args.Term > rf.curr_term { // if we are receiving message from new leader
 		rf.mutex.Lock()
@@ -234,9 +237,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.CurrLeader = rf.curr_leader
 		reply.Success = false
 	}
-	// rf.mutex.Lock()
+
 	rf.ResetTimer()
-	// rf.mutex.Unlock()
 
 	// Log entries
 }
@@ -272,16 +274,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	log.Printf("id %d: Received Reply from: %d with response: %t", rf.me, reply.PeerId, reply.VoteGranted)
+	// log.Printf("id %d: Received Reply from: %d with response: %t", rf.me, reply.PeerId, reply.VoteGranted)
 	rf.reply_message_ch <- *reply
 	return ok
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+
 	if reply.CurrTerm > rf.curr_term {
 		rf.mutex.Lock()
-		log.Printf("id %d: Converting to flllower in append entries", rf.me)
 		rf.curr_term = reply.CurrTerm
 		rf.curr_leader = reply.CurrLeader
 		rf.curr_state = FOLLOWER
@@ -389,7 +391,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // HANDLERS
 func (rf *Raft) HeartbeatHandler() {
 	for {
-		if rf.curr_state == LEADER {
+		rf.mutex.Lock()
+		curr_state := rf.curr_state
+		rf.mutex.Unlock()
+
+		if curr_state == LEADER {
 			// log.Printf("Sending heartbeats as leader: %d", rf.me)
 			for index, _ := range rf.peers {
 				if index != rf.me {
@@ -408,23 +414,31 @@ func (rf *Raft) HeartbeatHandler() {
 				}
 			}
 
-			time.Sleep(time.Millisecond * 200)
 		}
+
+		time.Sleep(time.Millisecond * 200)
 	}
 }
 
 func (rf *Raft) GeneralHandler() {
 	rf.ResetTimer()
 	for {
-		if rf.curr_state == LEADER {
-			// log.Printf("IS LEADER %d\n", rf.me)
+		// Grab current state for this iteration
+		rf.mutex.Lock()
+		curr_state := rf.curr_state
+		rf.mutex.Unlock()
+
+		if curr_state == LEADER {
+			log.Printf("IS LEADER %d\n", rf.me)
 			// break
 
-		}
+			// call function to send appendentries
 
-		if rf.curr_state == FOLLOWER {
+			rf.HandleLogConsensus()
+
+		} else if curr_state == FOLLOWER {
 			log.Printf("IS FOLLOWER %d\n", rf.me)
-			rf.mutex.Lock()
+
 			select {
 			case <-rf.append_message_ch:
 				log.Printf("APPEND MESSAGE SENT %d\n", rf.me)
@@ -434,18 +448,15 @@ func (rf *Raft) GeneralHandler() {
 				rf.ResetTimer()
 			case <-rf.timer.C:
 				log.Printf("TIMED OUT (as follower) %d\n", rf.me)
+				rf.mutex.Lock()
 				rf.curr_state = CANDIDATE
 				rf.curr_leader = -1
+				rf.mutex.Unlock()
+
 				rf.ResetTimer()
 			}
-			rf.mutex.Unlock()
-			// break
-		}
-		// log.Printf("Reaching before curr state is candidate... %d", rf.me)
 
-		if rf.curr_state == CANDIDATE {
-			// log.Printf("IS CANDIDATE %d\n", rf.me)
-			rf.mutex.Lock()
+		} else if curr_state == CANDIDATE {
 			select {
 			case <-rf.vote_message_ch:
 				log.Printf("VOTE MESSAGE RECEIVED %d\n", rf.me)
@@ -453,22 +464,48 @@ func (rf *Raft) GeneralHandler() {
 			case <-rf.timer.C:
 				log.Printf("TIMED OUT (as candidate) %d\n", rf.me)
 				rf.ResetTimer()
+				rf.mutex.Lock()
 				rf.StartElection()
+				rf.mutex.Unlock()
 			default:
-				// log.Printf("DEFAULT CASE-----------")
+				rf.mutex.Lock()
 				if rf.HasMajorityVote() {
-					log.Printf("HAS MAJORITY VOTE, id: %d\n", rf.me)
 					rf.curr_leader = rf.me
 					rf.curr_state = LEADER
 					rf.ResetTimer()
 				}
+				rf.mutex.Unlock()
 			}
-			rf.mutex.Unlock()
-			// break
+
 		}
 
 	}
 
+}
+
+func (rf *Raft) HandleLogConsensus() {
+	log.Printf("In handle log consensus...")
+
+	for index, _ := range rf.peers {
+		if index != rf.me {
+			args := AppendEntriesArgs{
+				Term:            rf.curr_term,
+				LeaderId:        rf.me,
+				PrevLogTerm:     -1,
+				PrevLogIndex:    -1,
+				Entries:         []LogEntry{},
+				LeaderCommitIdx: -1,
+			}
+			reply := AppendEntriesReply{}
+			rf.sendAppendEntries(index, &args, &reply)
+
+			if reply.Success == true {
+				// Update log indecies, etc.
+			} else {
+				// Demote to follower
+			}
+		}
+	}
 }
 
 // HELPER METHODS
@@ -525,12 +562,12 @@ func (rf *Raft) CountVotes() {
 	for {
 		select {
 		case reply := <-rf.reply_message_ch:
-			log.Printf("id: %d, reply channel vote granted: %t", rf.me, reply.VoteGranted)
+			// log.Printf("id: %d, reply channel vote granted: %t", rf.me, reply.VoteGranted)
 			if reply.VoteGranted == true {
 				rf.yes_votes = rf.yes_votes + 1
 			}
 		case <-rf.timer.C:
-			log.Printf("timer ran out lolololol")
+			// log.Printf("timer ran out lolololol")
 			rf.ResetTimer()
 			return
 		}
@@ -540,7 +577,7 @@ func (rf *Raft) CountVotes() {
 func (rf *Raft) HasMajorityVote() bool {
 	majority := int(math.Ceil(float64(rf.total_nodes) / 2.0))
 	if rf.yes_votes >= majority {
-		log.Printf("id: %d, has majority vote is true with %d yes votes", rf.me, rf.yes_votes)
+		// log.Printf("id: %d, has majority vote is true with %d yes votes", rf.me, rf.yes_votes)
 		return true
 	}
 	return false
