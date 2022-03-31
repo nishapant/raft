@@ -14,7 +14,6 @@ import "fmt"
 import "time"
 import "math/rand"
 import "sync"
-import "log"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
