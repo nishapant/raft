@@ -471,7 +471,7 @@ func (rf *Raft) GeneralHandler() {
 		rf.mutex.Unlock()
 
 		if curr_state == LEADER {
-			log.Printf("IS LEADER %d\n", rf.me)
+			// log.Printf("IS LEADER %d\n", rf.me)
 			// break
 
 			// Handle AppendEntries RPC's
@@ -548,7 +548,11 @@ func (rf *Raft) HandleLogConsensus() {
 	for index, _ := range rf.peers {
 		if index != rf.me {
 			server_id := index
+
+			rf.mutex.Lock()
 			last_idx_follower := rf.clientNextIndex[server_id]
+			rf.mutex.Unlock()
+
 			new_entries := []LogEntry{} // THIS NEEDS TO CHANGE TO SOMETHING IDK
 
 			args := AppendEntriesArgs{
@@ -562,6 +566,7 @@ func (rf *Raft) HandleLogConsensus() {
 			reply := AppendEntriesReply{}
 			rf.sendAppendEntries(index, &args, &reply)
 
+			rf.mutex.Lock()
 			if reply.Success == true {
 				// This means that we got the right index! update stuff
 				rf.clientNextIndex[server_id] = last_idx_follower + len(new_entries)
@@ -571,6 +576,7 @@ func (rf *Raft) HandleLogConsensus() {
 				rf.clientNextIndex[server_id] = last_idx_follower - 1
 
 			}
+			rf.mutex.Unlock()
 		}
 	}
 }
