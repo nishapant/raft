@@ -68,7 +68,7 @@ const (
 
 type LogEntry struct {
 	Term    int
-	Command string
+	Command interface{}
 }
 
 //
@@ -103,8 +103,9 @@ type Raft struct {
 	timeout time.Duration
 
 	// Leader
-	curr_leader int
-	commit_idx  int
+	curr_leader  int
+	commit_idx   int // index of highest log entry known to be committed [paper]
+	last_applied int // index of highest log entry applied to state machine [paper]
 
 	// Candidate
 	votes     []Vote
@@ -162,7 +163,7 @@ type AppendEntriesArgs struct {
 	PrevLogIndex int
 	Entries      []LogEntry // Array with the entries to append
 
-	LeaderCommitIdx int // The highest index that the client can commit until
+	LeaderCommitIdx int // The highest index that the leader can commit until
 
 }
 
@@ -224,6 +225,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
+	if rf.curr_state == LEADER {
+		log.Printf("LEADER RECEIVES APPEND ENTRIES %d\n", rf.me)
+	}
 	// Reset timer
 	rf.ResetTimer()
 
@@ -247,35 +252,79 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// Log entries
+
 	// For all AppendEntryReply instances, set the curr leader and curr term
 	reply.CurrLeader = rf.curr_leader
 	reply.CurrTerm = rf.curr_term
 
-	self_index, _ := rf.get_last_log_entry_info()
+	_, self_last_index := rf.get_last_log_entry_info()
 
-	// Not yet reached the last element in our log array
-	if self_index < args.PrevLogIndex {
+	// Case 1: Our log is entry
+	if self_last_index == -1 {
+		if args.PrevLogIndex == -1 {
+			reply.Success = true
+			rf.log = append(rf.log, args.Entries...)
+			return
+		} else {
+			reply.Success = false
+			return
+		}
+
+	}
+
+	// Case 2: Not yet reached the last element in our log array
+	if self_last_index < args.PrevLogIndex {
 		reply.Success = false
 		return
 	}
 
-	// Reached last element in our log array!
-	if self_index >= args.PrevLogIndex {
-		// Iterate through our logs to find the first index that matches the term
-		// 		that the incoming AppendEntries RPC is proposing
-
-		for index, _ := range rf.log {
-			entry := rf.log[index]
-			if entry.Term == args.PrevLogTerm {
-				// keep going
-			} else {
-				// This is where the two logs do not match up
-				// idk bro
+	// Case 3: Reached elements in our log array
+	if self_last_index >= args.PrevLogIndex {
+		// Case 2.1: Found match! Append the entries, reply true
+		if len(rf.log) == 0 {
+			if self_last_index == args.PrevLogIndex {
+				rf.mutex.Lock()
+				rf.log = append(rf.log, args.Entries...)
+				rf.mutex.Unlock()
+				reply.Success = true
+				return
 			}
+			reply.Success = false
+			return
 		}
+
+		if rf.log[self_last_index].Term == args.PrevLogTerm {
+			rf.mutex.Lock()
+			rf.log = append(rf.log, args.Entries...)
+			rf.mutex.Unlock()
+			reply.Success = true
+			return
+		}
+		// Case 2.2: No match :( Delete entry, reply false
+		rf.mutex.Lock()
+		rf.log = rf.log[:len(rf.log)-1]
+		rf.mutex.Unlock()
+		reply.Success = false
+	}
+
+	// STEP 5 [from paper]: Commit Indexs
+	if args.LeaderCommitIdx > rf.commit_idx {
+		rf.mutex.Lock()
+		rf.commit_idx = min(args.LeaderCommitIdx, self_last_index)
+		rf.mutex.Unlock()
 	}
 
 }
+
+// for index, _ := range rf.log {
+// entry := rf.log[self_index]
+// if entry.Term == args.PrevLogTerm {
+// 	// keep going
+// } else {
+// 	// This is where the two logs do not match up
+// 	// idk bro
+// }
+// }
 
 //
 // example code to send a RequestVote RPC to a server.
@@ -315,16 +364,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-
-	if reply.CurrTerm > rf.curr_term {
-		rf.mutex.Lock()
-		rf.curr_term = reply.CurrTerm
-		rf.curr_leader = reply.CurrLeader
-		rf.curr_state = FOLLOWER
-		rf.yes_votes = 0
-		rf.mutex.Unlock()
-
-	}
 	return ok
 }
 
@@ -344,9 +383,21 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
-	term := -1
-	isLeader := true
+	term := rf.curr_term
+	isLeader := (rf.curr_leader == rf.me)
 
+	rf.mutex.Lock()
+	if isLeader {
+		entry := LogEntry{
+			Term:    term,
+			Command: command,
+		}
+		rf.curr_state = LEADER
+		rf.log = append(rf.log, entry)
+		index = len(rf.log)
+
+	}
+	rf.mutex.Unlock()
 	// Your code here (2B).
 
 	return index, term, isLeader
@@ -416,7 +467,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Messages
 	rf.log = make([]LogEntry, 0)
 	rf.clientNextIndex = make([]int, rf.total_nodes)
-	rf.clientNextIndex = make([]int, rf.total_nodes)
+	rf.clientMatchIndex = make([]int, rf.total_nodes)
 
 	// Reset Timer
 	rf.ResetTimer()
@@ -426,11 +477,34 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.HeartbeatHandler()
 	// 2) Handle messages / election / everything else
 	go rf.GeneralHandler()
+	// 3) Handle apply message channel
+	go rf.ApplyMsgHandler()
 
 	return rf
 }
 
 // HANDLERS
+// Appends stuff to the apply msg channel when something is committed
+// Must be 1 indexed: https://campuswire.com/c/G3023A061/feed/565
+func (rf *Raft) ApplyMsgHandler() {
+	for {
+		rf.mutex.Lock()
+		if rf.commit_idx > rf.last_applied {
+			rf.last_applied = rf.last_applied + 1
+			idx := rf.last_applied
+			new_msg := ApplyMsg{}
+			new_msg.Command = rf.log[idx].Command
+			new_msg.CommandIndex = idx + 1
+			rf.applyChannel <- new_msg
+		}
+
+		rf.mutex.Unlock()
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+}
+
 func (rf *Raft) HeartbeatHandler() {
 	for {
 		rf.mutex.Lock()
@@ -438,7 +512,7 @@ func (rf *Raft) HeartbeatHandler() {
 		rf.mutex.Unlock()
 
 		if curr_state == LEADER {
-			// log.Printf("Sending heartbeats as leader: %d", rf.me)
+			log.Printf("Sending heartbeats as leader: %d", rf.me)
 			for index, _ := range rf.peers {
 				if index != rf.me {
 					args := AppendEntriesArgs{
@@ -475,7 +549,9 @@ func (rf *Raft) GeneralHandler() {
 			// break
 
 			// Handle AppendEntries RPC's
+			rf.mutex.Lock()
 			rf.HandleLogConsensus()
+			rf.mutex.Unlock()
 
 		} else if curr_state == FOLLOWER {
 			log.Printf("IS FOLLOWER %d\n", rf.me)
@@ -513,11 +589,7 @@ func (rf *Raft) GeneralHandler() {
 			default:
 				// As default, check if we have the majority vote to become leader
 				rf.mutex.Lock()
-				if rf.HasMajorityVote() {
-					rf.curr_leader = rf.me
-					rf.curr_state = LEADER
-					rf.ResetTimer()
-				}
+				rf.CheckMajorityVote()
 				rf.mutex.Unlock()
 			}
 
@@ -528,33 +600,33 @@ func (rf *Raft) GeneralHandler() {
 }
 
 // HELPER METHODS
-// GENERAL
-
-// Returns (term, index) for the last entry of any raft
-func (rf *Raft) get_last_log_entry_info() (int, int) {
-	if len(rf.log) != 0 {
-		last_entry := rf.log[len(rf.log)-1]
-		return last_entry.Term, len(rf.log)
-	}
-
-	return rf.curr_term, 0
-}
 
 // LEADER
+
+// Wrapped in mutex - General Handler
 func (rf *Raft) HandleLogConsensus() {
-	// log.Printf("In handle log consensus...")
-	_, self_last_term := rf.get_last_log_entry_info()
+	self_last_term, _ := rf.get_last_log_entry_info()
+
+	if len(rf.log) == 0 {
+		// log.Printf("leader id: %d, log is empty", rf.me)
+		return
+	}
+
+	for i := 0; i < len(rf.log); i++ {
+		// log.Printf("id: %d, index: %d, term: %d", rf.me, i, rf.log[i].Term)
+	}
 
 	for index, _ := range rf.peers {
 		if index != rf.me {
 			server_id := index
-
-			rf.mutex.Lock()
 			last_idx_follower := rf.clientNextIndex[server_id]
-			rf.mutex.Unlock()
 
-			new_entries := []LogEntry{} // THIS NEEDS TO CHANGE TO SOMETHING IDK
-
+			var new_entries []LogEntry
+			if last_idx_follower == -1 { // send our entire log
+				new_entries = rf.log
+			} else {
+				new_entries = rf.log[last_idx_follower:] // LogEntry{} // THIS NEEDS TO CHANGE TO SOMETHING IDK
+			}
 			args := AppendEntriesArgs{
 				Term:            rf.curr_term,
 				LeaderId:        rf.me,
@@ -566,22 +638,28 @@ func (rf *Raft) HandleLogConsensus() {
 			reply := AppendEntriesReply{}
 			rf.sendAppendEntries(index, &args, &reply)
 
-			rf.mutex.Lock()
+			if reply.CurrTerm > rf.curr_term {
+				rf.curr_term = reply.CurrTerm
+				rf.curr_leader = reply.CurrLeader
+				rf.curr_state = FOLLOWER
+				rf.yes_votes = 0
+				return
+			}
 			if reply.Success == true {
 				// This means that we got the right index! update stuff
-				rf.clientNextIndex[server_id] = last_idx_follower + len(new_entries)
+				rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] + len(new_entries)
 				rf.clientMatchIndex[server_id] = rf.clientNextIndex[server_id] - 1
 			} else {
-				// update next index to be one less than it was before
-				rf.clientNextIndex[server_id] = last_idx_follower - 1
-
+				// update next index to be one less than it was before???
+				rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] - 1
 			}
-			rf.mutex.Unlock()
 		}
 	}
 }
 
 // CANDIDATE
+
+// Wrapped in Mutex - GeneralHandler
 func (rf *Raft) StartElection() {
 	log.Printf("STARTED ELECTION, id: %d\n", rf.me)
 
@@ -634,6 +712,23 @@ func (rf *Raft) CountVotes() {
 	}
 }
 
+// Wrapped in mutex - GeneralHandler
+func (rf *Raft) CheckMajorityVote() {
+	if rf.HasMajorityVote() {
+		rf.curr_leader = rf.me
+		rf.curr_state = LEADER
+		_, self_last_index := rf.get_last_log_entry_info()
+
+		for i := range rf.peers {
+			print(i)
+			rf.clientNextIndex[i] = self_last_index + 1
+			rf.clientMatchIndex[i] = 0
+		}
+		rf.ResetTimer()
+	}
+}
+
+// Wrapped in mutex - CheckMajorityVote
 func (rf *Raft) HasMajorityVote() bool {
 	majority := int(math.Ceil(float64(rf.total_nodes) / 2.0))
 	if rf.yes_votes >= majority {
@@ -659,4 +754,24 @@ func RandomNum(min int, max int) int {
 	rand.Seed(time.Now().UnixNano())
 	rand_num := rand.Intn(max-min+1) + min
 	return rand_num
+}
+
+// GENERAL
+
+// Returns (term, index) for the last entry of any raft
+func (rf *Raft) get_last_log_entry_info() (int, int) {
+	if len(rf.log) != 0 {
+		last_entry := rf.log[len(rf.log)-1]
+		return last_entry.Term, len(rf.log) - 1
+	}
+
+	return rf.curr_term, 0
+}
+
+// min function (which is a little sad)
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
