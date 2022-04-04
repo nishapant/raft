@@ -9,7 +9,7 @@ package raft
 //
 
 import "testing"
-
+import "log"
 import "fmt"
 import "time"
 import "math/rand"
@@ -29,6 +29,7 @@ func TestInitialElection2A(t *testing.T) {
 	// is a leader elected?
 	cfg.checkOneLeader()
 
+	log.Printf("reaching middle of first test")
 	// sleep a bit to avoid racing with followers learning of the
 	// election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
@@ -39,6 +40,8 @@ func TestInitialElection2A(t *testing.T) {
 
 	// does the leader+term stay the same if there is no network failure?
 	time.Sleep(2 * RaftElectionTimeout)
+
+	log.Printf("reaching after sleep of first test")
 	term2 := cfg.checkTerms()
 	if term1 != term2 {
 		fmt.Printf("warning: term changed even though there were no failures")
@@ -46,6 +49,8 @@ func TestInitialElection2A(t *testing.T) {
 
 	// there should still be a leader.
 	cfg.checkOneLeader()
+
+	log.Printf("reaching end of first test")
 
 	cfg.end()
 }

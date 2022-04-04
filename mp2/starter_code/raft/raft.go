@@ -186,8 +186,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Follow response logic from slides
 	// If curr term is greater than the argument term
 	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
+
 	curr_term := rf.curr_term
-	rf.mutex.Unlock()
 
 	if args.RequestTerm < curr_term {
 		reply.VoteGranted = false
@@ -195,43 +196,51 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// If curr term is less than argument term (we are old)
-	if args.RequestTerm > rf.curr_term {
-		rf.mutex.Lock()
+	if args.RequestTerm > curr_term {
 		rf.curr_state = FOLLOWER
 		rf.curr_term = args.RequestTerm
 		rf.voted_for = -1
 		rf.yes_votes = 0
-		rf.mutex.Unlock()
 	}
-
 	self_term, self_index := rf.get_last_log_entry_info()
 
 	voted_condition := (rf.voted_for == -1 || rf.voted_for == args.CandidateId)
 	log_deny_condition := (args.LastLogTerm > self_term) ||
 		((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index))
 
+	log.Printf("voted condition is %t on raft %d", voted_condition, rf.me)
 	log.Printf("log deny condition is %t on raft %d", log_deny_condition, rf.me)
 	if voted_condition && !log_deny_condition {
-		rf.mutex.Lock()
 		reply.VoteGranted = true
 		reply.CurrTerm = rf.curr_term
 		rf.voted_for = args.CandidateId
-		rf.mutex.Unlock()
 	}
 
 	// Add reply to request vote channel
 	if voted_condition && !log_deny_condition {
-		rf.vote_message_ch <- true
+		log.Printf("making vote message channel true on id: %d", rf.me)
+		go rf.append_to_vote_message_ch()
 	}
+
+	log.Printf("done with req vote rpc on id %d", rf.me)
+}
+
+func (rf *Raft) append_to_vote_message_ch() {
+	rf.vote_message_ch <- true
+}
+
+func (rf *Raft) append_to_append_message_ch() {
+	rf.append_message_ch <- true
 }
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Reset timer
-	rf.append_message_ch <- true
+	rf.append_to_append_message_ch()
 
 	// Mutex
 	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
 
 	// log.Printf("Heartbeat received from %d to %d", args.LeaderId, rf.me)
 	// Heartbeat
@@ -305,7 +314,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommitIdx > rf.commit_idx {
 		rf.commit_idx = min(args.LeaderCommitIdx, self_last_index)
 	}
-	rf.mutex.Unlock()
 
 }
 
@@ -344,13 +352,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	// rf.reply_message_ch <- *reply
 	log.Printf("id: %d Sending votes...", rf.me)
 
+	rf.mutex.Lock()
 	if reply.VoteGranted == true {
-		rf.mutex.Lock()
 		rf.yes_votes = rf.yes_votes + 1
 		log.Printf("got vote from %d for id %d", reply.PeerId, rf.me)
-		rf.mutex.Unlock()
 	} else if reply.VoteGranted == false {
-		rf.mutex.Lock()
 		if rf.curr_term < reply.CurrTerm {
 			rf.curr_state = FOLLOWER
 			rf.curr_term = reply.CurrTerm
@@ -358,8 +364,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.voted_for = -1
 			rf.ResetTimer() ///// CHECK TO MAKE SURE THIS IS OK IN A MUTEX
 		}
-		rf.mutex.Unlock()
+
 	}
+	rf.mutex.Unlock()
 
 	return ok
 }
@@ -545,25 +552,26 @@ func (rf *Raft) GeneralHandler() {
 		// Grab current state for this iteration
 		rf.mutex.Lock()
 		curr_state := rf.curr_state
+		// log.Printf("getting curr state, id %d", rf.me)
 		rf.mutex.Unlock()
 
 		if curr_state == LEADER {
 			// log.Printf("IS LEADER %d\n", rf.me)
 
 			// Handle AppendEntries RPC's
-			rf.mutex.Lock()
+			// rf.mutex.Lock()
 			rf.HandleLogConsensus()
-			rf.mutex.Unlock()
+			// rf.mutex.Unlock()
 
 		} else if curr_state == FOLLOWER {
 			log.Printf("IS FOLLOWER %d\n", rf.me)
 
 			select {
-			case <-rf.append_message_ch:
-				log.Printf("APPEND MESSAGE SENT %d\n", rf.me)
-				rf.ResetTimer()
 			case <-rf.vote_message_ch:
 				log.Printf("VOTE MESSAGE, id: %d\n", rf.me)
+				rf.ResetTimer()
+			case <-rf.append_message_ch:
+				log.Printf("APPEND MESSAGE SENT %d\n", rf.me)
 				rf.ResetTimer()
 			case <-rf.timer.C:
 				log.Printf("TIMED OUT (as follower) %d\n", rf.me)
@@ -576,7 +584,7 @@ func (rf *Raft) GeneralHandler() {
 			}
 
 		} else if curr_state == CANDIDATE {
-			// rf.mutex.Lock()
+			rf.mutex.Lock()
 
 			select {
 			// case <-rf.vote_message_ch:
@@ -589,12 +597,10 @@ func (rf *Raft) GeneralHandler() {
 				rf.ResetTimer()
 
 				// Call Election after timeout
-				rf.mutex.Lock()
 				rf.StartElection()
-				rf.mutex.Unlock()
 			default:
 				// As default, check if we have the majority vote to become leader
-				rf.mutex.Lock()
+				// rf.mutex.Lock()
 				if rf.HasMajorityVote() {
 					log.Printf("there is a majority vote %d --------------", rf.me)
 					rf.curr_leader = rf.me
@@ -612,10 +618,10 @@ func (rf *Raft) GeneralHandler() {
 				}
 
 				// rf.CheckMajorityVote()
-				rf.mutex.Unlock()
+				// rf.mutex.Unlock()
 				// log.Printf("Reaching in %d", rf.me)
 			}
-			// rf.mutex.Unlock()
+			rf.mutex.Unlock()
 		}
 		// log.Printf("id %d state %d", rf.me, rf.curr_state)
 	}
@@ -629,6 +635,9 @@ func (rf *Raft) GeneralHandler() {
 // Wrapped in mutex - General Handler
 func (rf *Raft) HandleLogConsensus() {
 	// log.Printf("leader is %d", rf.me)
+	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
+
 	self_last_term, _ := rf.get_last_log_entry_info()
 
 	if len(rf.log) == 0 {
@@ -718,8 +727,6 @@ func (rf *Raft) StartElection() {
 
 	time.Sleep(time.Millisecond * 300)
 	log.Printf("id %d: End of started election", rf.me)
-	// go rf.CountVotes()
-
 }
 
 // func (rf *Raft) CountVotes() {
@@ -780,9 +787,7 @@ func (rf *Raft) HasMajorityVote() bool {
 // 2) Creates a new timer with that duration
 func (rf *Raft) ResetTimer() {
 	duration := RandomNum(Min_Duration, Max_Duration)
-	// rf.mutex.Lock()
 	rf.timeout = time.Duration(duration) * time.Millisecond
-	// rf.mutex.Unlock()
 	rf.timer = time.NewTimer(rf.timeout)
 }
 
@@ -796,7 +801,9 @@ func RandomNum(min int, max int) int {
 // GENERAL
 
 // Returns (term, index) for the last entry of any raft
+// Wrapped in a mutex when it is called
 func (rf *Raft) get_last_log_entry_info() (int, int) {
+
 	if len(rf.log) != 0 {
 		last_entry := rf.log[len(rf.log)-1]
 		return last_entry.Term, len(rf.log) - 1
