@@ -75,7 +75,7 @@ type LogEntry struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mutex sync.Mutex          // L-ock to protect shared access to this peer's state
+	mutex sync.Mutex          // Lock to protect shared access to this peer's state
 	peers []*labrpc.ClientEnd // RPC end points of all peers
 	me    int                 // this peer's index into peers[]
 	dead  int32               // set by Kill()
@@ -225,50 +225,68 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	log.Printf("done with req vote rpc on id %d", rf.me)
 }
 
-func (rf *Raft) append_to_vote_message_ch() {
-	rf.vote_message_ch <- true
-}
-
-func (rf *Raft) append_to_append_message_ch() {
-	rf.append_message_ch <- true
-}
-
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// Reset timer
-	rf.append_to_append_message_ch()
-
+	reset_timer := func() {
+		go func() {
+			// Reset timer
+			rf.append_to_append_message_ch()
+		}()
+	}
 	// Mutex
 	rf.mutex.Lock()
+	defer reset_timer()
 	defer rf.mutex.Unlock()
 
-	// log.Printf("Heartbeat received from %d to %d", args.LeaderId, rf.me)
-	// Heartbeat
-	if args.Term > rf.curr_term { // if we are receiving message from new leader
-		rf.curr_state = FOLLOWER
-		rf.curr_leader = args.LeaderId
-		rf.curr_term = args.Term
-		rf.voted_for = -1
-	}
-
+	// OLD LEADER
 	// the other node is not up to date
 	// receiving message from an old leader
-	if rf.curr_term > args.Term {
+	// also heartbeat check
+	if args.Term < rf.curr_term {
 		reply.CurrTerm = rf.curr_term
 		reply.CurrLeader = rf.curr_leader
 		reply.Success = false
 		return
 	}
 
-	// Log entries
+	// log.Printf("Heartbeat received from %d to %d", args.LeaderId, rf.me)
+	// If leader / candidate / follower -> need to be a follower if you get an append entries
+	if args.Term > rf.curr_term { // if we are receiving message from new leader
+		log.Printf("Demoting myself %d", rf.me)
+		// State
+		rf.curr_state = FOLLOWER
+		rf.curr_leader = args.LeaderId
+		rf.curr_term = args.Term
+		rf.yes_votes = 0
+		rf.voted_for = -1
 
+		// Reply
+		reply.Success = true
+	}
+
+	if args.Term == rf.curr_term {
+		reply.Success = true
+	}
+
+	if len(args.Entries) == 0 {
+		// log.Printf("heartbeat from %d to %d", args.LeaderId, rf.me)
+		return
+	}
+
+	// Log entries
 	// For all AppendEntryReply instances, set the curr leader and curr term
 	reply.CurrLeader = rf.curr_leader
 	reply.CurrTerm = rf.curr_term
 
 	_, self_last_index := rf.get_last_log_entry_info()
 
-	// Case 1: Our log is entry
+	// Case 1: Not yet reached the last element in our log array
+	if self_last_index < args.PrevLogIndex {
+		reply.Success = false
+		return
+	}
+
+	// Case 2: Our log is entry
 	if self_last_index == -1 {
 		if args.PrevLogIndex == -1 {
 			reply.Success = true
@@ -279,12 +297,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			return
 		}
 
-	}
-
-	// Case 2: Not yet reached the last element in our log array
-	if self_last_index < args.PrevLogIndex {
-		reply.Success = false
-		return
 	}
 
 	// Case 3: Reached elements in our log array
@@ -358,11 +370,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		log.Printf("got vote from %d for id %d", reply.PeerId, rf.me)
 	} else if reply.VoteGranted == false {
 		if rf.curr_term < reply.CurrTerm {
+			defer rf.ResetTimer() ///// CHECK TO MAKE SURE THIS IS OK IN A MUTEX
 			rf.curr_state = FOLLOWER
 			rf.curr_term = reply.CurrTerm
 			rf.yes_votes = 0
 			rf.voted_for = -1
-			rf.ResetTimer() ///// CHECK TO MAKE SURE THIS IS OK IN A MUTEX
 		}
 
 	}
@@ -391,11 +403,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
+
 	index := -1
 	term := rf.curr_term
 	isLeader := (rf.curr_leader == rf.me)
 
-	rf.mutex.Lock()
 	if isLeader {
 		entry := LogEntry{
 			Term:    term,
@@ -406,7 +420,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.log)
 
 	}
-	rf.mutex.Unlock()
 	// Your code here (2B).
 
 	return index, term, isLeader
@@ -562,16 +575,17 @@ func (rf *Raft) GeneralHandler() {
 			// rf.mutex.Lock()
 			rf.HandleLogConsensus()
 			// rf.mutex.Unlock()
+			time.Sleep(40 * time.Millisecond)
 
 		} else if curr_state == FOLLOWER {
-			log.Printf("IS FOLLOWER %d\n", rf.me)
+			// log.Printf("IS FOLLOWER %d\n", rf.me)
 
 			select {
 			case <-rf.vote_message_ch:
 				log.Printf("VOTE MESSAGE, id: %d\n", rf.me)
 				rf.ResetTimer()
 			case <-rf.append_message_ch:
-				log.Printf("APPEND MESSAGE SENT %d\n", rf.me)
+				// log.Printf("APPEND MESSAGE SENT %d\n", rf.me)
 				rf.ResetTimer()
 			case <-rf.timer.C:
 				log.Printf("TIMED OUT (as follower) %d\n", rf.me)
@@ -634,62 +648,64 @@ func (rf *Raft) GeneralHandler() {
 
 // Wrapped in mutex - General Handler
 func (rf *Raft) HandleLogConsensus() {
-	// log.Printf("leader is %d", rf.me)
-	rf.mutex.Lock()
-	defer rf.mutex.Unlock()
-
-	self_last_term, _ := rf.get_last_log_entry_info()
-
-	if len(rf.log) == 0 {
-		// log.Printf("leader id: %d, log is empty", rf.me)
-		return
-	}
-
-	for i := 0; i < len(rf.log); i++ {
-		// log.Printf("id: %d, index: %d, term: %d", rf.me, i, rf.log[i].Term)
-	}
-
 	for index, _ := range rf.peers {
 		if index != rf.me {
-			server_id := index
-			last_idx_follower := rf.clientNextIndex[server_id]
-
-			var new_entries []LogEntry
-			if last_idx_follower == -1 { // send our entire log
-				new_entries = rf.log
-			} else {
-				new_entries = rf.log[last_idx_follower:] // LogEntry{} // THIS NEEDS TO CHANGE TO SOMETHING IDK
-			}
-			args := AppendEntriesArgs{
-				Term:            rf.curr_term,
-				LeaderId:        rf.me,
-				PrevLogTerm:     self_last_term,
-				PrevLogIndex:    last_idx_follower,
-				Entries:         new_entries,
-				LeaderCommitIdx: rf.commit_idx,
-			}
-			reply := AppendEntriesReply{}
-			rf.sendAppendEntries(index, &args, &reply)
-
-			// If there is another leader with a greater curr term
-			if reply.CurrTerm > rf.curr_term {
-				rf.curr_term = reply.CurrTerm
-				rf.curr_leader = reply.CurrLeader
-				rf.curr_state = FOLLOWER
-				rf.yes_votes = 0
-				rf.voted_for = -1
-				return
-			}
-			if reply.Success == true {
-				// This means that we got the right index! update stuff
-				rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] + len(new_entries)
-				rf.clientMatchIndex[server_id] = rf.clientNextIndex[server_id] - 1
-			} else {
-				// update next index to be one less than it was before???
-				rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] - 1
-			}
+			go rf.handleOneAppendEntryRPC(index)
 		}
 	}
+
+}
+
+func (rf *Raft) handleOneAppendEntryRPC(index int) {
+	rf.mutex.Lock()
+	server_id := index
+	self_last_term, _ := rf.get_last_log_entry_info()
+	last_idx_follower := rf.clientNextIndex[server_id]
+
+	var new_entries []LogEntry
+	if last_idx_follower <= 0 { // send our entire log
+		new_entries = rf.log
+	} else {
+		// log.Printf("len of log %d", len(rf.log))
+		// log.Printf("last idx follower for server %d on raft id %d is %d", server_id, rf.me, last_idx_follower)
+		new_entries = rf.log[(last_idx_follower - 1):] // LogEntry{} // THIS NEEDS TO CHANGE TO SOMETHING IDK
+	}
+	args := AppendEntriesArgs{
+		Term:            rf.curr_term,
+		LeaderId:        rf.me,
+		PrevLogTerm:     self_last_term,
+		PrevLogIndex:    last_idx_follower,
+		Entries:         new_entries,
+		LeaderCommitIdx: rf.commit_idx,
+	}
+	reply := AppendEntriesReply{}
+	rf.mutex.Unlock()
+
+	rf.sendAppendEntries(index, &args, &reply)
+
+	rf.mutex.Lock()
+	// log.Printf("got back append entries response on %d", rf.me)
+
+	// If there is another leader with a greater curr term
+	if reply.CurrTerm > rf.curr_term {
+		rf.curr_term = reply.CurrTerm
+		rf.curr_leader = reply.CurrLeader
+		rf.curr_state = FOLLOWER
+		rf.yes_votes = 0
+		rf.voted_for = -1
+	}
+
+	if reply.Success == true {
+		// This means that we got the right index! update stuff
+		// log.Printf("success is true server id %d, raft id %d", server_id, rf.me)
+		rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] + len(new_entries)
+		rf.clientMatchIndex[server_id] = rf.clientNextIndex[server_id] - 1
+	} else if rf.clientNextIndex[server_id] > 0 {
+		// update next index to be one less than it was before???
+		rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] - 1
+	}
+	rf.mutex.Unlock()
+
 }
 
 // CANDIDATE
@@ -725,7 +741,7 @@ func (rf *Raft) StartElection() {
 		}
 	}
 
-	time.Sleep(time.Millisecond * 300)
+	// time.Sleep(time.Millisecond * 300)
 	log.Printf("id %d: End of started election", rf.me)
 }
 
@@ -759,6 +775,7 @@ func (rf *Raft) CheckMajorityVote() {
 		log.Printf("there is a majority vote %d --------------", rf.me)
 		rf.curr_leader = rf.me
 		rf.curr_state = LEADER
+		rf.yes_votes = 0
 
 		log.Printf("is leader now, curr leader %d", rf.curr_leader)
 		_, self_last_index := rf.get_last_log_entry_info()
@@ -799,6 +816,15 @@ func RandomNum(min int, max int) int {
 }
 
 // GENERAL
+
+// Appends to appropriate channels
+func (rf *Raft) append_to_vote_message_ch() {
+	rf.vote_message_ch <- true
+}
+
+func (rf *Raft) append_to_append_message_ch() {
+	rf.append_message_ch <- true
+}
 
 // Returns (term, index) for the last entry of any raft
 // Wrapped in a mutex when it is called
