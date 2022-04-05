@@ -18,9 +18,11 @@ package raft
 //
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"math/rand"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -175,6 +177,16 @@ type AppendEntriesReply struct {
 	Success    bool
 }
 
+func (rf *Raft) PrintLog(prefix string, log_ []LogEntry) {
+	string_ := prefix + "curr_log from id " + strconv.Itoa(rf.me) + " ["
+	for _, entry := range log_ {
+		string_ += "(" + strconv.Itoa(entry.Term) + ", " + fmt.Sprintf("%v", entry.Command) + ")"
+		string_ += ", "
+	}
+	string_ += "]"
+	log.Printf(string_)
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -208,8 +220,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	log_deny_condition := (args.LastLogTerm > self_term) ||
 		((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index))
 
-	log.Printf("voted condition is %t on raft %d", voted_condition, rf.me)
-	log.Printf("log deny condition is %t on raft %d", log_deny_condition, rf.me)
+	// log.Printf("voted condition is %t on raft %d", voted_condition, rf.me)
+	// log.Printf("log deny condition is %t on raft %d", log_deny_condition, rf.me)
 	if voted_condition && !log_deny_condition {
 		reply.VoteGranted = true
 		reply.CurrTerm = rf.curr_term
@@ -218,11 +230,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// Add reply to request vote channel
 	if voted_condition && !log_deny_condition {
-		log.Printf("making vote message channel true on id: %d", rf.me)
+		// log.Printf("making vote message channel true on id: %d", rf.me)
 		go rf.append_to_vote_message_ch()
 	}
-
-	log.Printf("done with req vote rpc on id %d", rf.me)
 }
 
 // AppendEntries RPC Handler
@@ -268,8 +278,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 	}
 
+	_, len_log_minus_one := rf.get_last_log_entry_info()
+
+	//  Commit Indexs
+	if args.LeaderCommitIdx > rf.commit_idx {
+		log.Printf("_______Updating commit idx on raft %d", rf.me)
+		rf.commit_idx = min(args.LeaderCommitIdx, len_log_minus_one)
+	}
+
 	if len(args.Entries) == 0 {
-		// log.Printf("heartbeat from %d to %d", args.LeaderId, rf.me)
+		log.Printf("length of the append entries is 0 on raft %d", rf.me)
 		return
 	}
 
@@ -278,53 +296,43 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.CurrLeader = rf.curr_leader
 	reply.CurrTerm = rf.curr_term
 
-	_, self_last_index := rf.get_last_log_entry_info()
+	_, len_log_minus_one = rf.get_last_log_entry_info()
 
-	// Case 1: Not yet reached the last element in our log array
-	if self_last_index < args.PrevLogIndex {
-		reply.Success = false
-		return
-	}
+	// if len_log_minus_one < args.PrevLogIndex {
+	// 	log.Printf("AHHHHHHHHHH NO")
+	// 	reply.Success = false
+	// 	return
+	// }
 
-	// Case 2: Our log is entry
-	if self_last_index == -1 {
-		if args.PrevLogIndex == -1 {
-			reply.Success = true
-			rf.log = append(rf.log, args.Entries...)
-			return
-		} else {
-			reply.Success = false
-			return
-		}
+	// log.Printf("on id: %d, selflastindex %d, args.Prevlaogindex %d", rf.me, len_log_minus_one, args.PrevLogIndex)
+	log.Printf("raft %d", rf.me)
 
-	}
-
-	// Case 3: Reached elements in our log array
-	if self_last_index >= args.PrevLogIndex {
-		// Case 2.1: Found match! Append the entries, reply true
-		if len(rf.log) == 0 {
-			if self_last_index == args.PrevLogIndex {
+	if len_log_minus_one+1 == args.PrevLogIndex {
+		log.Printf("on id: %d selflastindex %d, args.PrevLogIndex %d ______________________", rf.me, len_log_minus_one, args.PrevLogIndex)
+		// Case 2: Our log is empty
+		if len_log_minus_one == -1 {
+			if args.PrevLogIndex == 0 {
+				log.Printf("empty: appending entries on %d from %d", rf.me, args.LeaderId)
 				rf.log = append(rf.log, args.Entries...)
 				reply.Success = true
+				rf.PrintLog("", rf.log)
 				return
 			}
 			reply.Success = false
 			return
 		}
 
-		if rf.log[self_last_index].Term == args.PrevLogTerm {
+		// Case 3: Log is not empty
+		if rf.log[len_log_minus_one].Term == args.PrevLogTerm { // TODO:check index
+			log.Printf("appending entries on %d from %d", rf.me, args.LeaderId)
 			rf.log = append(rf.log, args.Entries...)
+			rf.PrintLog("", rf.log)
 			reply.Success = true
 			return
 		}
 		// Case 2.2: No match :( Delete entry, reply false
 		rf.log = rf.log[:len(rf.log)-1]
 		reply.Success = false
-	}
-
-	// STEP 5 [from paper]: Commit Indexs
-	if args.LeaderCommitIdx > rf.commit_idx {
-		rf.commit_idx = min(args.LeaderCommitIdx, self_last_index)
 	}
 
 }
@@ -360,8 +368,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	// log.Printf("id %d: Received Reply from: %d with response: %t", rf.me, reply.PeerId, reply.VoteGranted)
-	// rf.reply_message_ch <- *reply
 	log.Printf("id: %d Sending votes...", rf.me)
 
 	rf.mutex.Lock()
@@ -370,7 +376,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		log.Printf("got vote from %d for id %d", reply.PeerId, rf.me)
 	} else if reply.VoteGranted == false {
 		if rf.curr_term < reply.CurrTerm {
-			defer rf.ResetTimer() ///// CHECK TO MAKE SURE THIS IS OK IN A MUTEX
+			defer rf.ResetTimer()
 			rf.curr_state = FOLLOWER
 			rf.curr_term = reply.CurrTerm
 			rf.yes_votes = 0
@@ -419,8 +425,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, entry)
 		index = len(rf.log)
 
+		log.Printf("ADDING TO LOG --------------------------")
+		for i, element := range rf.log {
+			log.Printf("index %d and element term is %d", i, element.Term)
+		}
+
+		rf.PrintLog("", rf.log)
 	}
-	// Your code here (2B).
 
 	return index, term, isLeader
 }
@@ -478,6 +489,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B).
 	// Leader
 	rf.curr_leader = -1
+	rf.commit_idx = -1
+	rf.last_applied = -1
 
 	// Candidate
 	rf.votes = make([]Vote, rf.total_nodes-1)
@@ -512,12 +525,16 @@ func (rf *Raft) ApplyMsgHandler() {
 	for {
 		rf.mutex.Lock()
 		if rf.commit_idx > rf.last_applied {
+			log.Printf("_______reaching inside applymsg___________")
 			rf.last_applied = rf.last_applied + 1
 			idx := rf.last_applied
 			new_msg := ApplyMsg{}
 			new_msg.Command = rf.log[idx].Command
+			log.Printf("Command is: %s", new_msg.Command)
 			new_msg.CommandIndex = idx + 1
+			new_msg.CommandValid = true
 			rf.applyChannel <- new_msg
+			log.Printf("sent message to apply channel ")
 		}
 
 		rf.mutex.Unlock()
@@ -543,7 +560,7 @@ func (rf *Raft) HeartbeatHandler() {
 						PrevLogTerm:     -1,
 						PrevLogIndex:    -1,
 						Entries:         []LogEntry{},
-						LeaderCommitIdx: -1,
+						LeaderCommitIdx: rf.commit_idx,
 					}
 					reply := AppendEntriesReply{}
 
@@ -572,9 +589,8 @@ func (rf *Raft) GeneralHandler() {
 			// log.Printf("IS LEADER %d\n", rf.me)
 
 			// Handle AppendEntries RPC's
-			// rf.mutex.Lock()
 			rf.HandleLogConsensus()
-			// rf.mutex.Unlock()
+			rf.CheckCommitMessages()
 			time.Sleep(40 * time.Millisecond)
 
 		} else if curr_state == FOLLOWER {
@@ -585,7 +601,6 @@ func (rf *Raft) GeneralHandler() {
 				log.Printf("VOTE MESSAGE, id: %d\n", rf.me)
 				rf.ResetTimer()
 			case <-rf.append_message_ch:
-				// log.Printf("APPEND MESSAGE SENT %d\n", rf.me)
 				rf.ResetTimer()
 			case <-rf.timer.C:
 				log.Printf("TIMED OUT (as follower) %d\n", rf.me)
@@ -601,9 +616,6 @@ func (rf *Raft) GeneralHandler() {
 			rf.mutex.Lock()
 
 			select {
-			// case <-rf.vote_message_ch:
-			// 	log.Printf("VOTE MESSAGE RECEIVED %d\n", rf.me)
-			// 	rf.ResetTimer()
 			case <-rf.append_message_ch:
 				rf.ResetTimer()
 			case <-rf.timer.C:
@@ -614,30 +626,25 @@ func (rf *Raft) GeneralHandler() {
 				rf.StartElection()
 			default:
 				// As default, check if we have the majority vote to become leader
-				// rf.mutex.Lock()
 				if rf.HasMajorityVote() {
 					log.Printf("there is a majority vote %d --------------", rf.me)
 					rf.curr_leader = rf.me
 					rf.curr_state = LEADER
+					rf.yes_votes = 0 // MAYBE TAKE THIS OUT IDK BRO
 
 					log.Printf("is leader now, curr leader %d", rf.curr_leader)
 					_, self_last_index := rf.get_last_log_entry_info()
 
 					for i := range rf.peers {
+						log.Printf("initialized to %d", self_last_index+1)
 						rf.clientNextIndex[i] = self_last_index + 1
 						rf.clientMatchIndex[i] = 0
 					}
 					rf.ResetTimer()
-					log.Printf("Reset the timer...")
 				}
-
-				// rf.CheckMajorityVote()
-				// rf.mutex.Unlock()
-				// log.Printf("Reaching in %d", rf.me)
 			}
 			rf.mutex.Unlock()
 		}
-		// log.Printf("id %d state %d", rf.me, rf.curr_state)
 	}
 
 }
@@ -646,34 +653,76 @@ func (rf *Raft) GeneralHandler() {
 
 // LEADER
 
+func (rf *Raft) CheckCommitMessages() {
+	// Update commit index
+	// if reply.success = true:
+	// 	look at each match index and see if there are any values can commit
+	//  commit first 3 messsages
+
+	// node 1 : 5
+	// node 2: 3
+	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
+
+	_, self_last_idx := rf.get_last_log_entry_info()
+
+	for i := self_last_idx; i > rf.commit_idx; i-- {
+		matched_count := 1
+		for i, matched := range rf.clientMatchIndex {
+			if i == rf.me {
+				continue
+			}
+			if matched > rf.commit_idx {
+				matched_count++
+			}
+		}
+
+		// If majority of peers are matched
+		if matched_count > len(rf.peers)/2 {
+			rf.commit_idx = i
+			break
+		}
+	}
+}
+
 // Wrapped in mutex - General Handler
 func (rf *Raft) HandleLogConsensus() {
 	for index, _ := range rf.peers {
 		if index != rf.me {
-			go rf.handleOneAppendEntryRPC(index)
+			go rf.HandleOneAppendEntryRPC(index)
 		}
 	}
-
 }
 
-func (rf *Raft) handleOneAppendEntryRPC(index int) {
+func (rf *Raft) HandleOneAppendEntryRPC(server_id int) {
 	rf.mutex.Lock()
-	server_id := index
-	self_last_term, _ := rf.get_last_log_entry_info()
+	if len(rf.log) == 0 {
+		rf.mutex.Unlock()
+		return
+	}
+	rf.mutex.Unlock()
+
+	rf.mutex.Lock()
+	self_last_term, self_last_index := rf.get_last_log_entry_info()
 	last_idx_follower := rf.clientNextIndex[server_id]
 
+	// Get the right log entries to append
 	var new_entries []LogEntry
-	if last_idx_follower <= 0 { // send our entire log
-		new_entries = rf.log
+
+	if last_idx_follower > self_last_index {
+		new_entries = []LogEntry{}
 	} else {
-		// log.Printf("len of log %d", len(rf.log))
-		// log.Printf("last idx follower for server %d on raft id %d is %d", server_id, rf.me, last_idx_follower)
-		new_entries = rf.log[(last_idx_follower - 1):] // LogEntry{} // THIS NEEDS TO CHANGE TO SOMETHING IDK
+		log.Printf("last idx follower, %d", last_idx_follower)
+		idx := last_idx_follower
+		new_entries = rf.log[idx:]
+		prefix := "IN HANDLE ONE APPEND ENTRY"
+		rf.PrintLog(prefix, new_entries)
 	}
+
 	args := AppendEntriesArgs{
 		Term:            rf.curr_term,
 		LeaderId:        rf.me,
-		PrevLogTerm:     self_last_term,
+		PrevLogTerm:     self_last_term, // change this later
 		PrevLogIndex:    last_idx_follower,
 		Entries:         new_entries,
 		LeaderCommitIdx: rf.commit_idx,
@@ -681,11 +730,10 @@ func (rf *Raft) handleOneAppendEntryRPC(index int) {
 	reply := AppendEntriesReply{}
 	rf.mutex.Unlock()
 
-	rf.sendAppendEntries(index, &args, &reply)
+	rf.sendAppendEntries(server_id, &args, &reply)
 
 	rf.mutex.Lock()
-	// log.Printf("got back append entries response on %d", rf.me)
-
+	defer rf.mutex.Unlock()
 	// If there is another leader with a greater curr term
 	if reply.CurrTerm > rf.curr_term {
 		rf.curr_term = reply.CurrTerm
@@ -693,18 +741,20 @@ func (rf *Raft) handleOneAppendEntryRPC(index int) {
 		rf.curr_state = FOLLOWER
 		rf.yes_votes = 0
 		rf.voted_for = -1
+		return
 	}
 
+	// Parse reply
 	if reply.Success == true {
+		log.Printf("success was true for leader %d and server %d", rf.me, server_id)
 		// This means that we got the right index! update stuff
-		// log.Printf("success is true server id %d, raft id %d", server_id, rf.me)
 		rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] + len(new_entries)
-		rf.clientMatchIndex[server_id] = rf.clientNextIndex[server_id] - 1
-	} else if rf.clientNextIndex[server_id] > 0 {
+		rf.clientMatchIndex[server_id] = rf.clientNextIndex[server_id]
+	} else if rf.clientNextIndex[server_id] >= 0 {
 		// update next index to be one less than it was before???
+		log.Printf("success was FALSE for leader %d and server %d", rf.me, server_id)
 		rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] - 1
 	}
-	rf.mutex.Unlock()
 
 }
 
@@ -727,8 +777,8 @@ func (rf *Raft) StartElection() {
 			args := RequestVoteArgs{
 				CandidateId:  rf.me,
 				RequestTerm:  rf.curr_term,
-				LastLogIndex: self_term,
-				LastLogTerm:  self_index,
+				LastLogIndex: self_index,
+				LastLogTerm:  self_term,
 			}
 			reply := RequestVoteReply{
 				PeerId:      index,
@@ -745,48 +795,24 @@ func (rf *Raft) StartElection() {
 	log.Printf("id %d: End of started election", rf.me)
 }
 
-// func (rf *Raft) CountVotes() {
-// 	log.Printf("In count votes, id: %d", rf.me)
-// 	if rf.yes_votes >=
-// }
+// Wrapped in mutex - GeneralHandler
+// func (rf *Raft) CheckMajorityVote() {
+// 	if rf.HasMajorityVote() {
+// 		log.Printf("there is a majority vote for %d --------------", rf.me)
+// 		rf.curr_leader = rf.me
+// 		rf.curr_state = LEADER
+// 		rf.yes_votes = 0
 
-// func (rf *Raft) CountVotes() {
-// 	log.Printf("In count votes, id: %d", rf.me)
-// 	for {
-// 		select {
-// 		case reply := <-rf.reply_message_ch:
-// 			// log.Printf("id: %d, reply channel vote granted: %t", rf.me, reply.VoteGranted)
-// 			if reply.VoteGranted == true {
-// 				rf.mutex.Lock()
-// 				rf.yes_votes = rf.yes_votes + 1
-// 				rf.mutex.Unlock()
-// 			}
-// 		case <-rf.timer.C:
-// 			// log.Printf("timer ran out lolololol")
-// 			rf.ResetTimer()
-// 			return
+// 		_, self_last_index := rf.get_last_log_entry_info()
+
+// 		for i := range rf.peers {
+// 			log.Printf("initialized to %d", self_last_index+1)
+// 			rf.clientNextIndex[i] = self_last_index + 1
+// 			rf.clientMatchIndex[i] = 0
 // 		}
+// 		rf.ResetTimer()
 // 	}
 // }
-
-// Wrapped in mutex - GeneralHandler
-func (rf *Raft) CheckMajorityVote() {
-	if rf.HasMajorityVote() {
-		log.Printf("there is a majority vote %d --------------", rf.me)
-		rf.curr_leader = rf.me
-		rf.curr_state = LEADER
-		rf.yes_votes = 0
-
-		log.Printf("is leader now, curr leader %d", rf.curr_leader)
-		_, self_last_index := rf.get_last_log_entry_info()
-
-		for i := range rf.peers {
-			rf.clientNextIndex[i] = self_last_index + 1
-			rf.clientMatchIndex[i] = 0
-		}
-		rf.ResetTimer()
-	}
-}
 
 // Wrapped in mutex - CheckMajorityVote
 func (rf *Raft) HasMajorityVote() bool {
@@ -829,13 +855,12 @@ func (rf *Raft) append_to_append_message_ch() {
 // Returns (term, index) for the last entry of any raft
 // Wrapped in a mutex when it is called
 func (rf *Raft) get_last_log_entry_info() (int, int) {
-
 	if len(rf.log) != 0 {
 		last_entry := rf.log[len(rf.log)-1]
 		return last_entry.Term, len(rf.log) - 1
 	}
 
-	return rf.curr_term, 0
+	return rf.curr_term, -1
 }
 
 // min function (which is a little sad)

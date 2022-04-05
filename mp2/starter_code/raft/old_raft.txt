@@ -185,3 +185,28 @@
 	// 		}
 	// 	}
 	// }
+
+
+	// func (rf *Raft) CountVotes() {
+// 	log.Printf("In count votes, id: %d", rf.me)
+// 	if rf.yes_votes >=
+// }
+
+// func (rf *Raft) CountVotes() {
+// 	log.Printf("In count votes, id: %d", rf.me)
+// 	for {
+// 		select {
+// 		case reply := <-rf.reply_message_ch:
+// 			// log.Printf("id: %d, reply channel vote granted: %t", rf.me, reply.VoteGranted)
+// 			if reply.VoteGranted == true {
+// 				rf.mutex.Lock()
+// 				rf.yes_votes = rf.yes_votes + 1
+// 				rf.mutex.Unlock()
+// 			}
+// 		case <-rf.timer.C:
+// 			// log.Printf("timer ran out lolololol")
+// 			rf.ResetTimer()
+// 			return
+// 		}
+// 	}
+// }

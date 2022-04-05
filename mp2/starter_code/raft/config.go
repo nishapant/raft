@@ -8,17 +8,21 @@ package raft
 // test with the original before submitting.
 //
 
-import "../labrpc"
-import "log"
-import "sync"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+import (
+	"log"
+	"math/rand"
+	"runtime"
+	"sync"
+	"testing"
+
+	"../labrpc"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -40,8 +44,8 @@ type config struct {
 	net       *labrpc.Network
 	n         int
 	rafts     []*Raft
-	applyErr  []string // from apply channel readers
-	connected []bool   // whether each server is on the net
+	applyErr  []string              // from apply channel readers
+	connected []bool                // whether each server is on the net
 	endnames  [][]string            // the port file names each sends to
 	logs      []map[int]interface{} // copy of each server's committed entries
 	start     time.Time             // time at which make_config() was called
@@ -122,9 +126,13 @@ func (cfg *config) start1(i int) {
 		for m := range applyCh {
 			err_msg := ""
 			if m.CommandValid == false {
+				log.Printf("command is invalid")
+
 				// ignore other types of ApplyMsg
 			} else {
+
 				v := m.Command
+				log.Printf("______printing v %v", v)
 				cfg.mu.Lock()
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
@@ -324,6 +332,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
 
+		log.Printf("_____ok: %t", ok)
 		if ok {
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v\n",
@@ -408,8 +417,10 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				log.Printf("number nd %d", nd) // nd should be three for first case
 				if nd > 0 && nd >= expectedServers {
 					// committed
+					log.Printf("committed, two commands are %s %s", cmd, cmd1)
 					if cmd1 == cmd {
 						// and it was the command we submitted.
 						return index
@@ -418,7 +429,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+				cfg.t.Fatalf("first: one(%v) failed to reach agreement", cmd)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
