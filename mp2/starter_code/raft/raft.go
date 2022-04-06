@@ -238,55 +238,76 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 	go rf.append_to_vote_message_ch()
 	// }
 
+	///////
+
+	// rf.mutex.Lock()
+	// defer rf.mutex.Unlock()
+
+	// reply.PeerId = rf.me
+
+	// if args.RequestTerm < rf.curr_term {
+	// 	log.Printf("on id %d, args req term from %d less than my term, raft %d", rf.me, args.CandidateId, rf.me)
+	// 	reply.VoteGranted = false
+	// 	reply.CurrTerm = rf.curr_term
+	// 	return
+	// }
+
+	// if args.RequestTerm > rf.curr_term {
+	// 	log.Printf("changing current term from %d to %d, raft %d", rf.curr_term, args.RequestTerm, rf.me)
+	// 	rf.curr_term = args.RequestTerm
+	// 	rf.voted_for = -1
+	// 	rf.yes_votes = 0
+	// }
+
+	// self_term, self_index := rf.get_last_log_entry_info()
+	// log_deny_condition := (args.LastLogTerm > self_term) ||
+	// 	((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index))
+	// voted_condition := (rf.voted_for == -1 || rf.voted_for == args.CandidateId)
+
+	// log.Printf("voted condition is %t on raft %d from %d", voted_condition, rf.me, args.CandidateId)
+	// log.Printf("log deny condition is %t on raft %d from %d", log_deny_condition, rf.me, args.CandidateId)
+
+	// if voted_condition && !log_deny_condition {
+	// 	reply.VoteGranted = true
+	// 	rf.curr_leader = args.CandidateId
+	// 	rf.voted_for = args.CandidateId
+	// 	rf.curr_state = FOLLOWER
+	// 	log.Printf("making vote message channel true on id: %d", rf.me)
+	// 	go rf.append_to_vote_message_ch()
+	// }
+
+	///////////////
+
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
 
-	reply.PeerId = rf.me
-	curr_term := rf.curr_term
-
-	if args.RequestTerm < curr_term {
-		log.Printf("on id %d, args req term from %d less than my term", rf.me, args.CandidateId)
+	if args.RequestTerm < rf.curr_term {
+		// reject request with stale term number
+		reply.CurrTerm = rf.curr_term
 		reply.VoteGranted = false
 		return
 	}
-	self_term, self_index := rf.get_last_log_entry_info()
-	// stale_log := (args.LastLogTerm <= self_term) && (args.LastLogIndex < self_index)
-	stale_log := (args.LastLogTerm < self_term) ||
-		((args.LastLogTerm == self_term) && (args.LastLogIndex < self_index))
 
-	log.Printf("log deny condition 1 is %t on raft %d from %d", (args.LastLogTerm > self_term), rf.me, args.CandidateId)
-	log.Printf("log deny condition 2 is %t on raft %d from %d", ((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index)), rf.me, args.CandidateId)
-	// If curr term is less than argument term (we are old)
-	if args.RequestTerm > curr_term {
-		if stale_log && (rf.curr_state == LEADER) {
-			log.Printf("Special case on raft id %d -------------------------------------", rf.me)
-			rf.curr_term = args.RequestTerm + 1
-			reply.VoteGranted = false
-			reply.CurrTerm = args.RequestTerm + 1
-			return
-		} else {
-			log.Printf("DEMOTE MYSELF on id %d, args req term from %d greater than than my term", rf.me, args.CandidateId)
-			rf.curr_state = FOLLOWER
-			rf.curr_term = args.RequestTerm
-			rf.voted_for = -1
-			rf.yes_votes = 0
-		}
+	if args.RequestTerm > rf.curr_term {
+		// become follower and update current term
+		rf.curr_state = FOLLOWER
+		rf.curr_term = args.RequestTerm
+		rf.voted_for = -1
 	}
 
-	self_term, self_index = rf.get_last_log_entry_info()
-	log_deny_condition := (args.LastLogTerm > self_term) ||
-		((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index))
-	voted_condition := (rf.voted_for == -1 || rf.voted_for == args.CandidateId)
+	reply.CurrTerm = rf.curr_term
+	reply.VoteGranted = false
 
-	log.Printf("voted condition is %t on raft %d from %d", voted_condition, rf.me, args.CandidateId)
-	if voted_condition && !log_deny_condition {
-		reply.VoteGranted = true
-		rf.curr_leader = args.CandidateId
-		reply.CurrTerm = rf.curr_term
+	if (rf.voted_for == -1 || rf.voted_for == args.CandidateId) && rf.isUpToDate(args.LastLogTerm, args.LastLogIndex) {
+		// vote for the candidate
 		rf.voted_for = args.CandidateId
-		// log.Printf("making vote message channel true on id: %d", rf.me)
-		go rf.append_to_vote_message_ch()
+		reply.VoteGranted = true
 	}
+}
+
+func (rf *Raft) isUpToDate(candidateTerm int, candidateIndex int) bool {
+	term, index := rf.get_last_log_entry_info()
+	return candidateTerm > term || (candidateTerm == term && candidateIndex >= index)
 }
 
 // AppendEntries RPC Handler
@@ -386,32 +407,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.log = rf.log[:len(rf.log)-1]
 		reply.Success = false
 	}
-
-	// baseIndex := 0
-
-	// if args.PrevLogIndex >= baseIndex && args.PrevLogTerm != rf.log[args.PrevLogIndex-baseIndex].Term {
-	// 	// if entry log[prevLogIndex] conflicts with new one, there may be conflict entries before.
-	// 	// bypass all entries during the problematic term to speed up.
-	// 	term := rf.log[args.PrevLogIndex-baseIndex].Term
-	// 	for i := args.PrevLogIndex - 1; i >= baseIndex; i-- {
-	// 		if rf.log[i-baseIndex].Term != term {
-	// 			reply.Success = false
-	// 			break
-	// 		}
-	// 	}
-	// } else if args.PrevLogIndex >= baseIndex-1 {
-	// 	// otherwise log up to prevLogIndex are safe.
-	// 	// merge lcoal log and entries from leader, and apply log if commitIndex changes.
-	// 	rf.log = rf.log[:args.PrevLogIndex-baseIndex+1]
-	// 	rf.log = append(rf.log, args.Entries...)
-
-	// 	reply.Success = true
-
-	// 	if rf.commit_idx < args.LeaderCommitIdx {
-	// 		// update commitIndex and apply log
-	// 		rf.commit_idx = min(args.LeaderCommitIdx, len_log_minus_one)
-	// 	}
-	// }
 
 }
 
