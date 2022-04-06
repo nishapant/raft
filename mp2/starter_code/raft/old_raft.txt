@@ -1,5 +1,27 @@
 // package go
 
+// Case 1: Not yet reached the last element in our log array
+// if len_log_minus_one < args.PrevLogIndex {
+// 	reply.Success = false
+// 	return
+// }
+
+// Case 2: Our log is empty
+// if len_log_minus_one == -1 {
+// 	if args.PrevLogIndex == -1 {
+// 		reply.Success = true
+// 		rf.log = append(rf.log, args.Entries...)
+// 		rf.PrintLog()
+// 		return
+// 	} else {
+// 		reply.Success = false
+// 		return
+// 	}
+
+// }
+
+// log.Printf("raft %d", rf.me)
+
 // func (rf *Raft) NewTerm(new_term int) {
 // 	// set the new term values
 // 	// wrap in a mutex
@@ -187,26 +209,4 @@
 	// }
 
 
-	// func (rf *Raft) CountVotes() {
-// 	log.Printf("In count votes, id: %d", rf.me)
-// 	if rf.yes_votes >=
-// }
-
-// func (rf *Raft) CountVotes() {
-// 	log.Printf("In count votes, id: %d", rf.me)
-// 	for {
-// 		select {
-// 		case reply := <-rf.reply_message_ch:
-// 			// log.Printf("id: %d, reply channel vote granted: %t", rf.me, reply.VoteGranted)
-// 			if reply.VoteGranted == true {
-// 				rf.mutex.Lock()
-// 				rf.yes_votes = rf.yes_votes + 1
-// 				rf.mutex.Unlock()
-// 			}
-// 		case <-rf.timer.C:
-// 			// log.Printf("timer ran out lolololol")
-// 			rf.ResetTimer()
-// 			return
-// 		}
-// 	}
-// }
+	

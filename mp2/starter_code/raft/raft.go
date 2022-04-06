@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"log"
 	"math"
 	"math/rand"
@@ -178,10 +177,10 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) PrintLog(prefix string, log_ []LogEntry) {
-	log.Printf("Reaching print log ")
+	// log.Printf("Reaching print log ")
 	string_ := prefix + "curr_log from id " + strconv.Itoa(rf.me) + " ["
-	for _, entry := range log_ {
-		string_ += "(" + strconv.Itoa(entry.Term) + ", " + fmt.Sprintf("%v", entry.Command) + ")"
+	for index, entry := range log_ {
+		string_ += "(" + strconv.Itoa(index) + ", " + strconv.Itoa(entry.Term) + ")"
 		string_ += ", "
 	}
 	string_ += "]"
@@ -198,39 +197,93 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// Follow response logic from slides
 	// If curr term is greater than the argument term
-	rf.mutex.Lock()
-	defer rf.mutex.Unlock()
+	// rf.mutex.Lock()
+	// defer rf.mutex.Unlock()
 
-	curr_term := rf.curr_term
+	// reply.PeerId = rf.me
+	// curr_term := rf.curr_term
 
-	if args.RequestTerm < curr_term {
-		reply.VoteGranted = false
-		return
-	}
+	// if args.RequestTerm < curr_term {
+	// 	log.Printf("on id %d, args req term from %d less than my term", rf.me, args.CandidateId)
+	// 	reply.VoteGranted = false
+	// 	return
+	// }
 
-	// If curr term is less than argument term (we are old)
-	if args.RequestTerm > curr_term {
-		rf.curr_state = FOLLOWER
-		rf.curr_term = args.RequestTerm
-		rf.voted_for = -1
-		rf.yes_votes = 0
-	}
-	self_term, self_index := rf.get_last_log_entry_info()
+	// // If curr term is less than argument term (we are old)
+	// if args.RequestTerm > curr_term {
+	// 	// log.Printf("DEMOTE MYSELF on id %d, args req term from %d greater than than my term", rf.me, args.CandidateId)
+	// 	rf.curr_state = FOLLOWER
+	// 	rf.curr_term = args.RequestTerm
+	// 	rf.voted_for = -1
+	// 	rf.yes_votes = 0
+	// }
+	// self_term, self_index := rf.get_last_log_entry_info()
 
-	voted_condition := (rf.voted_for == -1 || rf.voted_for == args.CandidateId)
-	log_deny_condition := (args.LastLogTerm > self_term) ||
-		((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index))
+	// voted_condition := (rf.voted_for == -1 || rf.voted_for == args.CandidateId)
+	// log_deny_condition := (args.LastLogTerm > self_term) ||
+	// 	((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index))
 
 	// log.Printf("voted condition is %t on raft %d", voted_condition, rf.me)
 	// log.Printf("log deny condition is %t on raft %d", log_deny_condition, rf.me)
-	if voted_condition && !log_deny_condition {
-		reply.VoteGranted = true
-		reply.CurrTerm = rf.curr_term
-		rf.voted_for = args.CandidateId
+	// if voted_condition && !log_deny_condition {
+	// 	reply.VoteGranted = true
+	// 	rf.curr_leader = args.CandidateId
+	// 	reply.CurrTerm = rf.curr_term
+	// 	rf.voted_for = args.CandidateId
+	// }
+
+	// // Add reply to request vote channel
+	// if voted_condition && !log_deny_condition {
+	// 	// log.Printf("making vote message channel true on id: %d", rf.me)
+	// 	go rf.append_to_vote_message_ch()
+	// }
+
+	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
+
+	reply.PeerId = rf.me
+	curr_term := rf.curr_term
+
+	if args.RequestTerm < curr_term {
+		log.Printf("on id %d, args req term from %d less than my term", rf.me, args.CandidateId)
+		reply.VoteGranted = false
+		return
+	}
+	self_term, self_index := rf.get_last_log_entry_info()
+	// stale_log := (args.LastLogTerm <= self_term) && (args.LastLogIndex < self_index)
+	stale_log := (args.LastLogTerm < self_term) ||
+		((args.LastLogTerm == self_term) && (args.LastLogIndex < self_index))
+
+	log.Printf("log deny condition 1 is %t on raft %d from %d", (args.LastLogTerm > self_term), rf.me, args.CandidateId)
+	log.Printf("log deny condition 2 is %t on raft %d from %d", ((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index)), rf.me, args.CandidateId)
+	// If curr term is less than argument term (we are old)
+	if args.RequestTerm > curr_term {
+		if stale_log && (rf.curr_state == LEADER) {
+			log.Printf("Special case on raft id %d -------------------------------------", rf.me)
+			rf.curr_term = args.RequestTerm + 1
+			reply.VoteGranted = false
+			reply.CurrTerm = args.RequestTerm + 1
+			return
+		} else {
+			log.Printf("DEMOTE MYSELF on id %d, args req term from %d greater than than my term", rf.me, args.CandidateId)
+			rf.curr_state = FOLLOWER
+			rf.curr_term = args.RequestTerm
+			rf.voted_for = -1
+			rf.yes_votes = 0
+		}
 	}
 
-	// Add reply to request vote channel
+	self_term, self_index = rf.get_last_log_entry_info()
+	log_deny_condition := (args.LastLogTerm > self_term) ||
+		((args.LastLogTerm == self_term) && (args.LastLogIndex > self_index))
+	voted_condition := (rf.voted_for == -1 || rf.voted_for == args.CandidateId)
+
+	log.Printf("voted condition is %t on raft %d from %d", voted_condition, rf.me, args.CandidateId)
 	if voted_condition && !log_deny_condition {
+		reply.VoteGranted = true
+		rf.curr_leader = args.CandidateId
+		reply.CurrTerm = rf.curr_term
+		rf.voted_for = args.CandidateId
 		// log.Printf("making vote message channel true on id: %d", rf.me)
 		go rf.append_to_vote_message_ch()
 	}
@@ -249,11 +302,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer reset_timer()
 	defer rf.mutex.Unlock()
 
+	// rf.PrintLog("in append entries handler: ", rf.log)
+	// log.Printf("in old leader, id: %d,, args term %d, curr term of us %d", rf.me, args.Term, rf.curr_term)
 	// OLD LEADER
 	// the other node is not up to date
 	// receiving message from an old leader
 	// also heartbeat check
 	if args.Term < rf.curr_term {
+		// log.Printf("in old leader, id: %d,, args term %d, curr term of us %d", rf.me, args.Term, rf.curr_term)
 		reply.CurrTerm = rf.curr_term
 		reply.CurrLeader = rf.curr_leader
 		reply.Success = false
@@ -277,6 +333,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.Term == rf.curr_term {
 		reply.Success = true
+		reply.CurrTerm = rf.curr_term
 	}
 
 	_, len_log_minus_one := rf.get_last_log_entry_info()
@@ -287,12 +344,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commit_idx = min(args.LeaderCommitIdx, len_log_minus_one)
 	}
 
-	if len(args.Entries) == 0 {
+	if len(args.Entries) == 0 { // if this is a heartbeat
 		// log.Printf("length of the append entries is 0 on raft %d", rf.me)
 		return
 	}
 
-	// Log entries
+	// LOG ENTRIES ----
 	// For all AppendEntryReply instances, set the curr leader and curr term
 	reply.CurrLeader = rf.curr_leader
 	reply.CurrTerm = rf.curr_term
@@ -307,10 +364,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// Case 2: Our log is empty
 		if len_log_minus_one == -1 {
 			if args.PrevLogIndex == -1 {
-				log.Printf("empty: appending entries on %d from %d", rf.me, args.LeaderId)
+				// log.Printf("empty: appending entries on %d from %d", rf.me, args.LeaderId)
 				rf.log = append(rf.log, args.Entries...)
 				reply.Success = true
-				// rf.PrintLog("", rf.log)
+				rf.PrintLog("empty log -> ", rf.log)
 				return
 			}
 			reply.Success = false
@@ -319,9 +376,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// Case 3: Log is not empty
 		if rf.log[len_log_minus_one].Term == args.PrevLogTerm { // TODO:check index
-			log.Printf("appending entries on %d from %d", rf.me, args.LeaderId)
+			// log.Printf("appending entries on %d from %d", rf.me, args.LeaderId)
 			rf.log = append(rf.log, args.Entries...)
-			// rf.PrintLog("", rf.log)
+			rf.PrintLog("log is not empty -> ", rf.log)
 			reply.Success = true
 			return
 		}
@@ -329,6 +386,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.log = rf.log[:len(rf.log)-1]
 		reply.Success = false
 	}
+
+	// baseIndex := 0
+
+	// if args.PrevLogIndex >= baseIndex && args.PrevLogTerm != rf.log[args.PrevLogIndex-baseIndex].Term {
+	// 	// if entry log[prevLogIndex] conflicts with new one, there may be conflict entries before.
+	// 	// bypass all entries during the problematic term to speed up.
+	// 	term := rf.log[args.PrevLogIndex-baseIndex].Term
+	// 	for i := args.PrevLogIndex - 1; i >= baseIndex; i-- {
+	// 		if rf.log[i-baseIndex].Term != term {
+	// 			reply.Success = false
+	// 			break
+	// 		}
+	// 	}
+	// } else if args.PrevLogIndex >= baseIndex-1 {
+	// 	// otherwise log up to prevLogIndex are safe.
+	// 	// merge lcoal log and entries from leader, and apply log if commitIndex changes.
+	// 	rf.log = rf.log[:args.PrevLogIndex-baseIndex+1]
+	// 	rf.log = append(rf.log, args.Entries...)
+
+	// 	reply.Success = true
+
+	// 	if rf.commit_idx < args.LeaderCommitIdx {
+	// 		// update commitIndex and apply log
+	// 		rf.commit_idx = min(args.LeaderCommitIdx, len_log_minus_one)
+	// 	}
+	// }
 
 }
 
@@ -363,13 +446,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	// log.Printf("id: %d Sending votes...", rf.me)
+	log.Printf("id: %d Sending votes...", rf.me)
 
 	rf.mutex.Lock()
 	if reply.VoteGranted == true {
 		rf.yes_votes = rf.yes_votes + 1
-		log.Printf("got vote from %d for id %d", reply.PeerId, rf.me)
+		// log.Printf("got vote from %d for id %d", reply.PeerId, rf.me)
 	} else if reply.VoteGranted == false {
+		// log.Printf("false votes from %d for id %d", reply.PeerId, rf.me)
+
 		if rf.curr_term < reply.CurrTerm {
 			defer rf.ResetTimer()
 			rf.curr_state = FOLLOWER
@@ -420,12 +505,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, entry)
 		index = len(rf.log)
 
+		rf.PrintLog("curr log: ", rf.log)
 		log.Printf("ADDING TO LOG --------------------------")
-		for i, element := range rf.log {
-			log.Printf("index %d and element term is %d", i, element.Term)
-		}
-
-		// rf.PrintLog("", rf.log)
 	}
 
 	return index, term, isLeader
@@ -595,7 +676,7 @@ func (rf *Raft) GeneralHandler() {
 
 			select {
 			case <-rf.vote_message_ch:
-				log.Printf("VOTE MESSAGE, id: %d\n", rf.me)
+				// log.Printf("VOTE MESSAGE, id: %d\n", rf.me)
 				rf.ResetTimer()
 			case <-rf.append_message_ch:
 				rf.ResetTimer()
@@ -612,6 +693,7 @@ func (rf *Raft) GeneralHandler() {
 		} else if curr_state == CANDIDATE {
 			rf.mutex.Lock()
 
+			// log.Printf("IS CANDIDATE %d\n", rf.me)
 			select {
 			case <-rf.append_message_ch:
 				rf.ResetTimer()
@@ -624,7 +706,7 @@ func (rf *Raft) GeneralHandler() {
 			default:
 				// As default, check if we have the majority vote to become leader
 				if rf.HasMajorityVote() {
-					log.Printf("there is a majority vote %d --------------", rf.me)
+					// log.Printf("id: %d, has majority vote %d", rf.me, rf.yes_votes)
 					rf.curr_leader = rf.me
 					rf.curr_state = LEADER
 					rf.yes_votes = 0 // MAYBE TAKE THIS OUT IDK BRO
@@ -700,6 +782,7 @@ func (rf *Raft) HandleOneAppendEntryRPC(server_id int) {
 	rf.mutex.Unlock()
 
 	rf.mutex.Lock()
+	// log.Printf("__Sending from %d to %d, term is: %d", rf.me, server_id, rf.curr_term)
 	_, self_last_index := rf.get_last_log_entry_info()
 	last_idx_follower := rf.clientNextIndex[server_id]
 
@@ -713,8 +796,7 @@ func (rf *Raft) HandleOneAppendEntryRPC(server_id int) {
 		// idx := max(last_idx_follower, 0)
 		idx := last_idx_follower
 		new_entries = rf.log[idx:]
-		// prefix := "IN HANDLE ONE APPEND ENTRY "
-		// rf.PrintLog(prefix, new_entries)
+		// rf.PrintLog("IN HANDLE ONE APPEND ENTRY ", new_entries)
 	}
 	term := -1
 
@@ -739,6 +821,7 @@ func (rf *Raft) HandleOneAppendEntryRPC(server_id int) {
 	defer rf.mutex.Unlock()
 	// If there is another leader with a greater curr term
 	if reply.CurrTerm > rf.curr_term {
+		log.Printf("Reaching here in id: %d with reply term %d and self term %d", rf.me, reply.CurrTerm, rf.curr_term)
 		rf.curr_term = reply.CurrTerm
 		rf.curr_leader = reply.CurrLeader
 		rf.curr_state = FOLLOWER
@@ -751,8 +834,11 @@ func (rf *Raft) HandleOneAppendEntryRPC(server_id int) {
 	if reply.Success == true {
 		// log.Printf("success was true for leader %d and server %d", rf.me, server_id)
 		// This means that we got the right index! update nextIndex and matchIndex
-		rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] + len(new_entries)
-		rf.clientMatchIndex[server_id] = rf.clientNextIndex[server_id]
+		if len(args.Entries) > 0 {
+			rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] + len(new_entries)
+			rf.clientMatchIndex[server_id] = rf.clientNextIndex[server_id]
+		}
+
 	} else if rf.clientNextIndex[server_id] > 0 {
 		// update next index to be one less than it was before???
 		// log.Printf("success was FALSE for leader %d and server %d", rf.me, server_id)
@@ -765,7 +851,7 @@ func (rf *Raft) HandleOneAppendEntryRPC(server_id int) {
 
 // Wrapped in Mutex - GeneralHandler
 func (rf *Raft) StartElection() {
-	log.Printf("STARTED ELECTION, id: %d\n", rf.me)
+	// log.Printf("STARTED ELECTION, id: %d\n", rf.me)
 
 	// Reset what we need to
 	rf.yes_votes = 1
@@ -790,32 +876,13 @@ func (rf *Raft) StartElection() {
 			}
 
 			// CHANGE THIS bc the reply thing isn't going to be updated in the separate thread bc i think diff stacks??
-			go rf.sendRequestVote(index, &args, &reply)
+			if rf.curr_state == CANDIDATE {
+				go rf.sendRequestVote(index, &args, &reply)
+			}
+
 		}
 	}
-
-	// time.Sleep(time.Millisecond * 300)
-	// log.Printf("id %d: End of started election", rf.me)
 }
-
-// Wrapped in mutex - GeneralHandler
-// func (rf *Raft) CheckMajorityVote() {
-// 	if rf.HasMajorityVote() {
-// 		log.Printf("there is a majority vote for %d --------------", rf.me)
-// 		rf.curr_leader = rf.me
-// 		rf.curr_state = LEADER
-// 		rf.yes_votes = 0
-
-// 		_, self_last_index := rf.get_last_log_entry_info()
-
-// 		for i := range rf.peers {
-// 			log.Printf("initialized to %d", self_last_index+1)
-// 			rf.clientNextIndex[i] = self_last_index + 1
-// 			rf.clientMatchIndex[i] = 0
-// 		}
-// 		rf.ResetTimer()
-// 	}
-// }
 
 // Wrapped in mutex - CheckMajorityVote
 func (rf *Raft) HasMajorityVote() bool {
