@@ -178,6 +178,7 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) PrintLog(prefix string, log_ []LogEntry) {
+	log.Printf("Reaching print log ")
 	string_ := prefix + "curr_log from id " + strconv.Itoa(rf.me) + " ["
 	for _, entry := range log_ {
 		string_ += "(" + strconv.Itoa(entry.Term) + ", " + fmt.Sprintf("%v", entry.Command) + ")"
@@ -282,12 +283,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	//  Commit Indexs
 	if args.LeaderCommitIdx > rf.commit_idx {
-		log.Printf("_______Updating commit idx on raft %d", rf.me)
+		// log.Printf("_______Updating commit idx on raft %d", rf.me)
 		rf.commit_idx = min(args.LeaderCommitIdx, len_log_minus_one)
 	}
 
 	if len(args.Entries) == 0 {
-		log.Printf("length of the append entries is 0 on raft %d", rf.me)
+		// log.Printf("length of the append entries is 0 on raft %d", rf.me)
 		return
 	}
 
@@ -298,24 +299,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	_, len_log_minus_one = rf.get_last_log_entry_info()
 
-	// if len_log_minus_one < args.PrevLogIndex {
-	// 	log.Printf("AHHHHHHHHHH NO")
-	// 	reply.Success = false
-	// 	return
-	// }
-
 	// log.Printf("on id: %d, selflastindex %d, args.Prevlaogindex %d", rf.me, len_log_minus_one, args.PrevLogIndex)
-	log.Printf("raft %d", rf.me)
+	// log.Printf("raft %d", rf.me)
 
-	if len_log_minus_one+1 == args.PrevLogIndex {
-		log.Printf("on id: %d selflastindex %d, args.PrevLogIndex %d ______________________", rf.me, len_log_minus_one, args.PrevLogIndex)
+	if len_log_minus_one == args.PrevLogIndex {
+		// log.Printf("on id: %d selflastindex %d, args.PrevLogIndex %d ______________________", rf.me, len_log_minus_one, args.PrevLogIndex)
 		// Case 2: Our log is empty
 		if len_log_minus_one == -1 {
-			if args.PrevLogIndex == 0 {
+			if args.PrevLogIndex == -1 {
 				log.Printf("empty: appending entries on %d from %d", rf.me, args.LeaderId)
 				rf.log = append(rf.log, args.Entries...)
 				reply.Success = true
-				rf.PrintLog("", rf.log)
+				// rf.PrintLog("", rf.log)
 				return
 			}
 			reply.Success = false
@@ -326,7 +321,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.log[len_log_minus_one].Term == args.PrevLogTerm { // TODO:check index
 			log.Printf("appending entries on %d from %d", rf.me, args.LeaderId)
 			rf.log = append(rf.log, args.Entries...)
-			rf.PrintLog("", rf.log)
+			// rf.PrintLog("", rf.log)
 			reply.Success = true
 			return
 		}
@@ -368,7 +363,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	log.Printf("id: %d Sending votes...", rf.me)
+	// log.Printf("id: %d Sending votes...", rf.me)
 
 	rf.mutex.Lock()
 	if reply.VoteGranted == true {
@@ -430,7 +425,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			log.Printf("index %d and element term is %d", i, element.Term)
 		}
 
-		rf.PrintLog("", rf.log)
+		// rf.PrintLog("", rf.log)
 	}
 
 	return index, term, isLeader
@@ -530,7 +525,7 @@ func (rf *Raft) ApplyMsgHandler() {
 			idx := rf.last_applied
 			new_msg := ApplyMsg{}
 			new_msg.Command = rf.log[idx].Command
-			log.Printf("Command is: %s", new_msg.Command)
+			// log.Printf("Command is: %s", new_msg.Command)
 			new_msg.CommandIndex = idx + 1
 			new_msg.CommandValid = true
 			rf.applyChannel <- new_msg
@@ -554,6 +549,7 @@ func (rf *Raft) HeartbeatHandler() {
 			// log.Printf("Sending heartbeats as leader: %d", rf.me)
 			for index, _ := range rf.peers {
 				if index != rf.me {
+					rf.mutex.Lock()
 					args := AppendEntriesArgs{
 						Term:            rf.curr_term,
 						LeaderId:        rf.me,
@@ -563,6 +559,7 @@ func (rf *Raft) HeartbeatHandler() {
 						LeaderCommitIdx: rf.commit_idx,
 					}
 					reply := AppendEntriesReply{}
+					rf.mutex.Unlock()
 
 					// Send append entries
 					go rf.sendAppendEntries(index, &args, &reply)
@@ -636,7 +633,7 @@ func (rf *Raft) GeneralHandler() {
 					_, self_last_index := rf.get_last_log_entry_info()
 
 					for i := range rf.peers {
-						log.Printf("initialized to %d", self_last_index+1)
+						// log.Printf("initialized to %d", self_last_index+1)
 						rf.clientNextIndex[i] = self_last_index + 1
 						rf.clientMatchIndex[i] = 0
 					}
@@ -703,7 +700,7 @@ func (rf *Raft) HandleOneAppendEntryRPC(server_id int) {
 	rf.mutex.Unlock()
 
 	rf.mutex.Lock()
-	self_last_term, self_last_index := rf.get_last_log_entry_info()
+	_, self_last_index := rf.get_last_log_entry_info()
 	last_idx_follower := rf.clientNextIndex[server_id]
 
 	// Get the right log entries to append
@@ -712,18 +709,24 @@ func (rf *Raft) HandleOneAppendEntryRPC(server_id int) {
 	if last_idx_follower > self_last_index {
 		new_entries = []LogEntry{}
 	} else {
-		log.Printf("last idx follower, %d", last_idx_follower)
+		// log.Printf("last idx follower, %d", last_idx_follower)
+		// idx := max(last_idx_follower, 0)
 		idx := last_idx_follower
 		new_entries = rf.log[idx:]
-		prefix := "IN HANDLE ONE APPEND ENTRY"
-		rf.PrintLog(prefix, new_entries)
+		// prefix := "IN HANDLE ONE APPEND ENTRY "
+		// rf.PrintLog(prefix, new_entries)
+	}
+	term := -1
+
+	if last_idx_follower <= len(rf.log) && last_idx_follower > 0 {
+		term = rf.log[last_idx_follower-1].Term
 	}
 
 	args := AppendEntriesArgs{
 		Term:            rf.curr_term,
 		LeaderId:        rf.me,
-		PrevLogTerm:     self_last_term, // change this later
-		PrevLogIndex:    last_idx_follower,
+		PrevLogTerm:     term,
+		PrevLogIndex:    last_idx_follower - 1,
 		Entries:         new_entries,
 		LeaderCommitIdx: rf.commit_idx,
 	}
@@ -746,13 +749,13 @@ func (rf *Raft) HandleOneAppendEntryRPC(server_id int) {
 
 	// Parse reply
 	if reply.Success == true {
-		log.Printf("success was true for leader %d and server %d", rf.me, server_id)
-		// This means that we got the right index! update stuff
+		// log.Printf("success was true for leader %d and server %d", rf.me, server_id)
+		// This means that we got the right index! update nextIndex and matchIndex
 		rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] + len(new_entries)
 		rf.clientMatchIndex[server_id] = rf.clientNextIndex[server_id]
-	} else if rf.clientNextIndex[server_id] >= 0 {
+	} else if rf.clientNextIndex[server_id] > 0 {
 		// update next index to be one less than it was before???
-		log.Printf("success was FALSE for leader %d and server %d", rf.me, server_id)
+		// log.Printf("success was FALSE for leader %d and server %d", rf.me, server_id)
 		rf.clientNextIndex[server_id] = rf.clientNextIndex[server_id] - 1
 	}
 
@@ -792,7 +795,7 @@ func (rf *Raft) StartElection() {
 	}
 
 	// time.Sleep(time.Millisecond * 300)
-	log.Printf("id %d: End of started election", rf.me)
+	// log.Printf("id %d: End of started election", rf.me)
 }
 
 // Wrapped in mutex - GeneralHandler
@@ -866,6 +869,14 @@ func (rf *Raft) get_last_log_entry_info() (int, int) {
 // min function (which is a little sad)
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+// max function (also sad)
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
